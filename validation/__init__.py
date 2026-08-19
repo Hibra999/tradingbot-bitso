@@ -1,4 +1,16 @@
 from .cpcv import CPCVFold, CPCVSplitter
+from .metrics import (
+    ProbabilityRatio,
+    calmar_ratio,
+    centered_block_bootstrap_test,
+    deflated_sharpe_ratio,
+    drawdowns,
+    institutional_metrics,
+    probabilistic_sharpe_ratio,
+    sharpe_ratio,
+    sortino_ratio,
+)
+from .monte_carlo import MonteCarloResult, moving_block_monte_carlo
 from .randomization import DomainRandomizer, PerturbationConfig, RandomizedEpisode
 from .seeds import SeedEvaluation, SeedHarness, aggregate_seed_results
 
@@ -6,9 +18,20 @@ __all__ = [
     "CPCVFold",
     "CPCVSplitter",
     "DomainRandomizer",
+    "MonteCarloResult",
     "PerturbationConfig",
     "RandomizedEpisode",
+    "ProbabilityRatio",
     "SeedEvaluation",
     "SeedHarness",
     "aggregate_seed_results",
+    "calmar_ratio",
+    "centered_block_bootstrap_test",
+    "deflated_sharpe_ratio",
+    "drawdowns",
+    "institutional_metrics",
+    "moving_block_monte_carlo",
+    "probabilistic_sharpe_ratio",
+    "sharpe_ratio",
+    "sortino_ratio",
 ]

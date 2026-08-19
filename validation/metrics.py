@@ -1,0 +1,145 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+from scipy import stats
+
+
+@dataclass(frozen=True)
+class ProbabilityRatio:
+    z_score: float
+    probability: float
+    p_value: float
+
+
+def _returns(values: np.ndarray | list[float]) -> np.ndarray:
+    array = np.asarray(values, dtype=float)
+    array = array[np.isfinite(array)]
+    if len(array) < 2 or bool((array <= -1).any()):
+        raise ValueError("at least two finite returns greater than -1 are required")
+    return array
+
+
+def drawdowns(returns: np.ndarray | list[float]) -> np.ndarray:
+    equity = np.cumprod(1 + _returns(returns))
+    return equity / np.maximum.accumulate(equity) - 1
+
+
+def sharpe_ratio(returns: np.ndarray | list[float], periods_per_year: int = 365 * 24) -> float:
+    values = _returns(returns)
+    volatility = values.std(ddof=1)
+    return float(values.mean() / volatility * np.sqrt(periods_per_year)) if volatility > 0 else float("nan")
+
+
+def sortino_ratio(returns: np.ndarray | list[float], periods_per_year: int = 365 * 24) -> float:
+    values = _returns(returns)
+    downside = np.sqrt(np.mean(np.minimum(values, 0) ** 2))
+    return float(values.mean() / downside * np.sqrt(periods_per_year)) if downside > 0 else float("nan")
+
+
+def calmar_ratio(returns: np.ndarray | list[float], periods_per_year: int = 365 * 24) -> float:
+    values = _returns(returns)
+    annualized = float(np.prod(1 + values) ** (periods_per_year / len(values)) - 1)
+    maximum_drawdown = abs(float(drawdowns(values).min()))
+    return annualized / maximum_drawdown if maximum_drawdown > 0 else float("nan")
+
+
+def probabilistic_sharpe_ratio(
+    returns: np.ndarray | list[float],
+    benchmark_sharpe: float = 0.0,
+    periods_per_year: int = 365 * 24,
+) -> ProbabilityRatio:
+    values = _returns(returns)
+    sample = values.mean() / values.std(ddof=1)
+    benchmark = benchmark_sharpe / np.sqrt(periods_per_year)
+    skew = stats.skew(values, bias=False)
+    kurtosis = stats.kurtosis(values, fisher=False, bias=False)
+    denominator = np.sqrt(max(1 - skew * sample + ((kurtosis - 1) / 4) * sample**2, 1e-15))
+    z_score = float((sample - benchmark) * np.sqrt(len(values) - 1) / denominator)
+    probability = float(stats.norm.cdf(z_score))
+    return ProbabilityRatio(z_score, probability, 1 - probability)
+
+
+def deflated_sharpe_ratio(
+    returns: np.ndarray | list[float],
+    trial_sharpes: np.ndarray | list[float],
+    periods_per_year: int = 365 * 24,
+) -> ProbabilityRatio:
+    trials = np.asarray(trial_sharpes, dtype=float)
+    trials = trials[np.isfinite(trials)]
+    if len(trials) < 2:
+        raise ValueError("DSR requires at least two trial Sharpe ratios")
+    gamma = 0.5772156649015329
+    expected_max = trials.mean() + trials.std(ddof=1) * (
+        (1 - gamma) * stats.norm.ppf(1 - 1 / len(trials))
+        + gamma * stats.norm.ppf(1 - 1 / (len(trials) * np.e))
+    )
+    return probabilistic_sharpe_ratio(returns, float(expected_max), periods_per_year)
+
+
+def centered_block_bootstrap_test(
+    returns: np.ndarray | list[float],
+    *,
+    block_size: int = 24,
+    repetitions: int = 2_000,
+    seed: int = 0,
+) -> dict[str, float]:
+    values = _returns(returns)
+    if not 1 <= block_size <= len(values) or repetitions < 1:
+        raise ValueError("invalid block size or repetition count")
+    centered = values - values.mean()
+    rng = np.random.default_rng(seed)
+    block_count = int(np.ceil(len(values) / block_size))
+    starts = rng.integers(0, len(values) - block_size + 1, size=(repetitions, block_count))
+    offsets = np.arange(block_size)
+    samples = centered[(starts[..., None] + offsets).reshape(repetitions, -1)[:, : len(values)]]
+    bootstrap_means = samples.mean(axis=1)
+    observed = float(values.mean())
+    p_value = float((1 + np.count_nonzero(np.abs(bootstrap_means) >= abs(observed))) / (repetitions + 1))
+    return {"mean": observed, "p_value": p_value}
+
+
+def institutional_metrics(
+    returns: np.ndarray | list[float],
+    *,
+    trial_sharpes: np.ndarray | list[float],
+    periods_per_year: int = 365 * 24,
+    bootstrap_repetitions: int = 2_000,
+    seed: int = 0,
+) -> dict[str, float]:
+    values = _returns(returns)
+    gains, losses = values[values > 0].sum(), -values[values < 0].sum()
+    q05, q95 = np.quantile(values, [0.05, 0.95])
+    psr = probabilistic_sharpe_ratio(values, periods_per_year=periods_per_year)
+    dsr = deflated_sharpe_ratio(values, trial_sharpes, periods_per_year)
+    t_test = stats.ttest_1samp(values, popmean=0.0)
+    bootstrap = centered_block_bootstrap_test(
+        values,
+        block_size=min(24, len(values)),
+        repetitions=bootstrap_repetitions,
+        seed=seed,
+    )
+    result = {
+        "sharpe": sharpe_ratio(values, periods_per_year),
+        "sortino": sortino_ratio(values, periods_per_year),
+        "calmar": calmar_ratio(values, periods_per_year),
+        "omega": float(gains / losses) if losses > 0 else float("inf"),
+        "gain_to_pain": float(values.sum() / losses) if losses > 0 else float("inf"),
+        "tail_ratio": float(q95 / abs(q05)) if q05 < 0 else float("inf"),
+        "psr_probability": psr.probability,
+        "psr_p_value": psr.p_value,
+        "dsr_z": dsr.z_score,
+        "dsr_probability": dsr.probability,
+        "dsr_p_value": dsr.p_value,
+        "t_statistic": float(t_test.statistic),
+        "t_test_p_value": float(t_test.pvalue),
+        "bootstrap_p_value": bootstrap["p_value"],
+        "max_drawdown": float(drawdowns(values).min()),
+    }
+    for confidence in (0.95, 0.99):
+        tail = values[values <= np.quantile(values, 1 - confidence)]
+        suffix = int(confidence * 100)
+        result[f"var_{suffix}"] = float(-np.quantile(values, 1 - confidence))
+        result[f"cvar_{suffix}"] = float(-tail.mean())
+    return result
