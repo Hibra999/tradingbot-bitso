@@ -388,6 +388,7 @@ class KillSwitch:
     async def _run(self, reason: str) -> KillReport:
         started = time.perf_counter()
         self.engine.frozen = True
+        self.engine.journal.set_state("kill_latch", {"latched": True})
         self.engine.journal.append("kill_triggered", {"reason": reason})
         self.engine.persist()
         cancellations = [asyncio.create_task(self.engine.cancel_order(order_id)) for order_id in tuple(self.engine.open_order_ids)]

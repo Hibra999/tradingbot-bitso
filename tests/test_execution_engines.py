@@ -90,6 +90,7 @@ class ExecutionEngineTests(unittest.IsolatedAsyncioTestCase):
             self.assertLess(first.dispatch_latency_ms, 500)
             self.assertTrue(first.confirmed_flat)
             self.assertTrue(recovered.frozen)
+            self.assertTrue(journal.get_state("kill_latch")["latched"])
             self.assertEqual(recovered.cancelled, ["stop"])
             journal.close()
 

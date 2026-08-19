@@ -11,14 +11,14 @@ from typing import Any
 _SECRET_WORDS = ("secret", "password", "token", "authorization", "api_key")
 
 
-def _safe_json(value: Any) -> Any:
+def safe_payload(value: Any) -> Any:
     if isinstance(value, dict):
         return {
-            str(key): "[redacted]" if any(word in str(key).lower() for word in _SECRET_WORDS) else _safe_json(item)
+            str(key): "[redacted]" if any(word in str(key).lower() for word in _SECRET_WORDS) else safe_payload(item)
             for key, item in value.items()
         }
     if isinstance(value, (list, tuple)):
-        return [_safe_json(item) for item in value]
+        return [safe_payload(item) for item in value]
     if isinstance(value, (Decimal, datetime, Path)):
         return str(value)
     return value
@@ -51,7 +51,7 @@ class ExecutionJournal:
         )
 
     def append(self, event_type: str, payload: dict[str, Any]) -> int:
-        encoded = json.dumps(_safe_json(payload), sort_keys=True, separators=(",", ":"))
+        encoded = json.dumps(safe_payload(payload), sort_keys=True, separators=(",", ":"))
         with self._lock, self._db:
             cursor = self._db.execute(
                 "INSERT INTO events(created_at, event_type, payload) VALUES (?, ?, ?)",
@@ -60,7 +60,7 @@ class ExecutionJournal:
         return int(cursor.lastrowid)
 
     def set_state(self, key: str, value: dict[str, Any]) -> None:
-        encoded = json.dumps(_safe_json(value), sort_keys=True, separators=(",", ":"))
+        encoded = json.dumps(safe_payload(value), sort_keys=True, separators=(",", ":"))
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._db:
             self._db.execute(

@@ -12,7 +12,7 @@ from .engines import (
     TrackedPosition,
     consume_depth,
 )
-from .journal import ExecutionJournal
+from .journal import ExecutionJournal, safe_payload
 from .models import Balance, Bracket, EngineSnapshot, Fill, OrderTicket, TradeIntent
 from .order_book import BookOrder, LocalOrderBook, SequenceGapError
 from .rate_limit import TokenBucket
@@ -49,4 +49,5 @@ __all__ = [
     "consume_depth",
     "generate_nonce_v2",
     "sign_request",
+    "safe_payload",
 ]
