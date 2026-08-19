@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -72,13 +74,13 @@ def plot_trades_on_chart(df: pd.DataFrame, trades: pd.DataFrame, n: int = 500, t
         tr = tr[(tr["entry_time"] >= d.index.min()) & (tr["entry_time"] <= d.index.max())]
         if not tr.empty:
             # Offset so triangles sit just outside the bar instead of on the price line.
-            # 0.2 % of entry price gives ~4 pts on XAUUSD 2000 — visible but not intrusive.
+            # 0.2 % of entry price gives ~4 pts on XAUUSD 2000 - visible but not intrusive.
             offset = tr["entry_price"] * 0.002
 
             longs  = tr[tr["direction"] ==  1]
             shorts = tr[tr["direction"] == -1]
 
-            # ── Entry markers ────────────────────────────────────────────────
+            # -- Entry markers ------------------------------------------------
             # Long  : green  ▲  placed BELOW entry price
             if not longs.empty:
                 fig.add_trace(go.Scatter(
@@ -105,7 +107,7 @@ def plot_trades_on_chart(df: pd.DataFrame, trades: pd.DataFrame, n: int = 500, t
                     ),
                 ))
 
-            # ── Exit markers split by reason ─────────────────────────────────
+            # -- Exit markers split by reason ---------------------------------
             tp_exits    = tr[tr["exit_reason"] == "TP"]
             sl_exits    = tr[tr["exit_reason"] == "SL"]
             other_exits = tr[~tr["exit_reason"].isin(["TP", "SL"])]
@@ -113,25 +115,25 @@ def plot_trades_on_chart(df: pd.DataFrame, trades: pd.DataFrame, n: int = 500, t
             if not tp_exits.empty:
                 fig.add_trace(go.Scatter(
                     x=tp_exits["exit_time"], y=tp_exits["exit_price"],
-                    mode="markers", name="Exit — TP",
+                    mode="markers", name="Exit - TP",
                     marker=dict(symbol="circle", size=9,
                                 color="#00c853", line=dict(color="#007c2e", width=1)),
                 ))
             if not sl_exits.empty:
                 fig.add_trace(go.Scatter(
                     x=sl_exits["exit_time"], y=sl_exits["exit_price"],
-                    mode="markers", name="Exit — SL",
+                    mode="markers", name="Exit - SL",
                     marker=dict(symbol="x-thin", size=11,
                                 color="#d50000", line=dict(color="#7f0000", width=2)),
                 ))
             if not other_exits.empty:
                 fig.add_trace(go.Scatter(
                     x=other_exits["exit_time"], y=other_exits["exit_price"],
-                    mode="markers", name="Exit — manual",
+                    mode="markers", name="Exit - manual",
                     marker=dict(symbol="diamond", size=9, color="#9e9e9e"),
                 ))
 
-            # ── Dashed connector arrows + TP/SL brackets (last 50 trades) ────
+            # -- Dashed connector arrows + TP/SL brackets (last 50 trades) ----
             for _, r in tr.tail(50).iterrows():
                 entry_t = r["entry_time"]
                 exit_t  = r["exit_time"]
@@ -140,7 +142,7 @@ def plot_trades_on_chart(df: pd.DataFrame, trades: pd.DataFrame, n: int = 500, t
                 span_t  = exit_t - entry_t   # pd.Timedelta
                 span_p  = exit_p - entry_p
 
-                # Dashed line body — entry → exit
+                # Dashed line body - entry -> exit
                 fig.add_shape(
                     type="line",
                     x0=entry_t, y0=entry_p,
@@ -150,7 +152,7 @@ def plot_trades_on_chart(df: pd.DataFrame, trades: pd.DataFrame, n: int = 500, t
                 )
 
                 # Arrowhead only: annotation tail sits 90 % of the way from
-                # entry → exit (data coordinates) so only the tip is visible,
+                # entry -> exit (data coordinates) so only the tip is visible,
                 # giving the dashed-arrow effect without overriding the dashed line.
                 if abs(span_t.total_seconds()) > 1 or abs(span_p) > 1e-8:
                     fig.add_annotation(
@@ -205,20 +207,47 @@ def save_html(fig, path):
     return path
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+def save_html_combined(figs, path, title="RL Trading - Pipeline Report"):
+    """Merge several plotly figures into a single standalone HTML document.
+
+    ``figs`` is an iterable of ``(name, figure)`` tuples.  plotly.js is
+    included once via CDN and each figure is embedded below an <h2> heading,
+    so the result is one scrollable report instead of N separate files.
+    """
+    snippets = []
+    for name, fig in figs:
+        if fig is None:
+            continue
+        snippet = fig.to_html(full_html=False, include_plotlyjs=False)
+        snippets.append(
+            f'<h2 style="font-family:sans-serif;color:#1565c0;margin:40px 0 10px 0">{name}</h2>\n{snippet}'
+        )
+    body = "\n".join(snippets)
+    html = (
+        "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
+        f"<title>{title}</title>\n"
+        '<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>\n'
+        "</head>\n<body style=\"margin:24px;font-family:sans-serif;background:#fafafa\">\n"
+        f"<h1 style=\"color:#0d47a1\">{title}</h1>\n{body}\n</body>\n</html>"
+    )
+    Path(path).write_text(html, encoding="utf-8")
+    return path
+
+
+# -----------------------------------------------------------------------------
 # Training / validation analysis
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def plot_insample_oos_equity(
     equities: dict[str, pd.DataFrame],
     initial_equity: float = 10_000.0,
-    title: str = "Equity — in-sample → out-of-sample",
+    title: str = "Equity - in-sample -> out-of-sample",
 ) -> go.Figure:
-    """Chain Train → Val → Test equity curves onto a single time axis.
+    """Chain Train -> Val -> Test equity curves onto a single time axis.
 
     Each segment is rescaled so it starts exactly where the previous one ended,
     giving a single continuous equity narrative.  Vertical dashed lines mark
-    the in-sample / out-of-sample boundaries with a ← label.
+    the in-sample / out-of-sample boundaries with a <- label.
 
     Parameters
     ----------
@@ -284,7 +313,7 @@ def plot_insample_oos_equity(
         )
         fig.add_annotation(
             x=ts, y=1.01, yref="paper",
-            text=f"← {left} | {right} →",
+            text=f"<- {left} | {right} ->",
             showarrow=False,
             font=dict(size=11, color="#546e7a"),
             xanchor="center",
@@ -301,7 +330,7 @@ def plot_insample_oos_equity(
 
 def plot_equity_comparison(
     splits: dict[str, pd.DataFrame],
-    title: str = "Equity curves — all splits (normalised to 100)",
+    title: str = "Equity curves - all splits (normalised to 100)",
 ) -> go.Figure:
     """Overlay equity curves for Train / Val / Test (and optional Baseline).
 
@@ -416,7 +445,7 @@ def plot_exit_breakdown(
 
 def plot_entry_timing(
     trades: pd.DataFrame,
-    title: str = "Trade entry — hour × weekday frequency",
+    title: str = "Trade entry - hour x weekday frequency",
 ) -> go.Figure:
     """Heat map: how many trades were entered at each (weekday, hour) cell."""
     if trades is None or trades.empty:
@@ -441,7 +470,7 @@ def plot_bracket_usage(
     trades: pd.DataFrame,
     sl_atr_multipliers: tuple | list,
     tp_r_multipliers: tuple | list,
-    title: str = "Agent bracket selection — SL × TP heatmap",
+    title: str = "Agent bracket selection - SL x TP heatmap",
 ) -> go.Figure:
     """Heatmap showing how often the agent chose each (SL, TP) bracket,
     with the average realized R annotated in each cell.
@@ -453,7 +482,7 @@ def plot_bracket_usage(
         return go.Figure().update_layout(title="No trades")
     if "sl_atr_mult" not in trades.columns or "tp_r_bracket" not in trades.columns:
         return go.Figure().update_layout(
-            title="Bracket columns missing — re-run simulation with updated env")
+            title="Bracket columns missing - re-run simulation with updated env")
 
     tr = trades.copy()
     # Snap to nearest grid value (float rounding safety).
@@ -481,7 +510,7 @@ def plot_bracket_usage(
     fig = go.Figure(go.Heatmap(
         z=counts.values,
         x=[f"TP {v}R" for v in tp_vals],
-        y=[f"SL {v}×ATR" for v in sl_vals],
+        y=[f"SL {v}xATR" for v in sl_vals],
         text=cell_text, texttemplate="%{text}",
         colorscale="Blues", colorbar_title="# trades",
     ))
@@ -547,7 +576,7 @@ def plot_metrics_table(
 
     def _fmt(v) -> str:
         if v is None or (isinstance(v, float) and not np.isfinite(v)):
-            return "—"
+            return "-"
         return f"{v:.3f}" if isinstance(v, float) else str(int(v))
 
     # Build column lists for Plotly Table (one list per column).

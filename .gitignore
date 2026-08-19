@@ -1,0 +1,8 @@
+# Secrets — nunca subir a git
+.env
+
+# Cache de datos descargada desde Alpaca
+data/alpaca_*.csv
+
+# Python
+__pycache__/

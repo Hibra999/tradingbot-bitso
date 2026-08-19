@@ -1,5 +1,5 @@
 """
-view_results.py — visualise any slice of a saved simulation without re-running.
+view_results.py - visualise any slice of a saved simulation without re-running.
 
 Reloads OHLCV data and recomputes indicators (seconds), then overlays the
 trade log and equity curve that were saved to outputs/ by run_pipeline.py.
@@ -36,7 +36,7 @@ from pathlib import Path
 import pandas as pd
 
 from config import CFG
-from data_loader import load_mt_ohlcv_csv, resample_ohlcv, split_train_val_test
+from data_loader import load_ohlcv, resample_ohlcv, split_train_val_test
 from features import prepare_feature_frame
 from evaluate import full_report
 from visualize import (
@@ -51,22 +51,13 @@ _OUT = Path("outputs")
 _VIEW = Path("outputs/view")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Data helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _load_features() -> tuple[pd.DataFrame, list[str]]:
-    """Reload M1, resample, compute features.  Takes ~5–15 s; no simulation."""
-    m1 = load_mt_ohlcv_csv(
-        CFG.csv_path,
-        time_col=CFG.time_col,
-        source_tz=CFG.source_tz,
-        timestamp_is_bar_open=CFG.timestamp_is_bar_open,
-        bar_duration=CFG.pandas_execution_tf,
-        start_date=CFG.start_date,
-        end_date=CFG.end_date,
-        max_days_for_demo=CFG.max_days_for_demo,
-    )
+    """Reload M1, resample, compute features.  Takes ~5-15 s; no simulation."""
+    m1 = load_ohlcv(CFG)
     decision = resample_ohlcv(m1, CFG.pandas_tf)
     feat, feature_cols = prepare_feature_frame(
         decision,
@@ -80,7 +71,7 @@ def _load_features() -> tuple[pd.DataFrame, list[str]]:
 def _load_trades(path: Path = _OUT / "selected_val_trade_log.csv") -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(
-            f"{path} not found — run run_pipeline.py or train_ppo.py first."
+            f"{path} not found - run run_pipeline.py or train_ppo.py first."
         )
     trades = pd.read_csv(path)
     for col in ("entry_time", "exit_time"):
@@ -92,7 +83,7 @@ def _load_trades(path: Path = _OUT / "selected_val_trade_log.csv") -> pd.DataFra
 def _load_equity(path: Path = _OUT / "selected_val_equity_curve.csv") -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(
-            f"{path} not found — run run_pipeline.py or train_ppo.py first."
+            f"{path} not found - run run_pipeline.py or train_ppo.py first."
         )
     eq = pd.read_csv(path, index_col=0)
     eq.index = pd.to_datetime(eq.index, utc=True).tz_convert(CFG.source_tz)
@@ -162,9 +153,9 @@ def _filter_trades(
     return d
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Main API
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def view_slice(
     start: str | None = None,
@@ -182,7 +173,7 @@ def view_slice(
     ----------
     start, end : date strings like "2024-01-01"
     bars       : show last N decision bars (applied after start/end filtering)
-    split      : "train" | "val" | "test" — uses CFG split fractions
+    split      : "train" | "val" | "test" - uses CFG split fractions
     trade_log  : path to saved trade-log CSV (validation by default)
     equity_csv : path to saved equity-curve CSV (validation by default)
     out_dir    : where to write the slice HTML files
@@ -191,26 +182,26 @@ def view_slice(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── 1. Features (fast reload) ────────────────────────────────────────────
-    print("Loading features …")
+    # -- 1. Features (fast reload) --------------------------------------------
+    print("Loading features ...")
     feat, feature_cols = _load_features()
 
-    # ── 2. Resolve start / end from split name if given ─────────────────────
+    # -- 2. Resolve start / end from split name if given ---------------------
     if split is not None:
         t0, t1 = _split_bounds(feat, split)
         start = start or t0
         end   = end   or t1
-        print(f"  Split '{split}':  {t0}  →  {t1}")
+        print(f"  Split '{split}':  {t0}  ->  {t1}")
 
-    # ── 3. Filter feature frame ──────────────────────────────────────────────
+    # -- 3. Filter feature frame ----------------------------------------------
     feat_slice = _filter_feat(feat, start, end, bars, CFG.source_tz)
     if feat_slice.empty:
-        raise ValueError("No bars in the requested slice — check your date range.")
+        raise ValueError("No bars in the requested slice - check your date range.")
     t_start = feat_slice.index.min()
     t_end   = feat_slice.index.max()
-    print(f"  Slice: {t_start}  →  {t_end}  ({len(feat_slice):,} bars)")
+    print(f"  Slice: {t_start}  ->  {t_end}  ({len(feat_slice):,} bars)")
 
-    # ── 4. Load & filter saved simulation outputs ────────────────────────────
+    # -- 4. Load & filter saved simulation outputs ----------------------------
     trades = _load_trades(Path(trade_log))
     equity = _load_equity(Path(equity_csv))
     trades_slice = _filter_trades(trades, t_start, t_end)
@@ -219,7 +210,7 @@ def view_slice(
     n_trades = len(trades_slice)
     print(f"  Trades in slice: {n_trades}")
 
-    # ── 5. Performance summary for this slice ─────────────────────────────────
+    # -- 5. Performance summary for this slice ---------------------------------
     if not equity_slice.empty:
         rep = full_report(equity_slice, trades_slice,
                           initial_equity=float(equity_slice["equity"].iloc[0]),
@@ -227,7 +218,7 @@ def view_slice(
         print("\n  Performance for this slice:")
         print(rep.to_string())
 
-    # ── 6. Generate HTML charts ───────────────────────────────────────────────
+    # -- 6. Generate HTML charts -----------------------------------------------
     slug = _slug(start, end, split, bars)
 
     charts = {
@@ -282,9 +273,9 @@ def _slug(
     return "_".join(parts) if parts else "slice"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # CLI
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _parse() -> argparse.Namespace:
     p = argparse.ArgumentParser(

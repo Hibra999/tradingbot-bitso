@@ -15,7 +15,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from config import CFG
 from data_loader import (
-    load_mt_ohlcv_csv,
+    load_ohlcv,
     make_sliding_folds,
     make_walk_forward_folds,
     resample_ohlcv,
@@ -27,7 +27,7 @@ from env_bracket import BracketTradingEnv
 from model_artifacts import load_run_info
 
 
-# ── Pickle-safe factory for SubprocVecEnv ────────────────────────────────────
+# -- Pickle-safe factory for SubprocVecEnv ------------------------------------
 # Must be at module level (not a lambda) so subprocesses can import it.
 def _spawn_train_env(decision_df, m1_df, feature_cols, episode_steps):
     """Called inside each worker process to build one training environment."""
@@ -47,16 +47,7 @@ def _load_decision_features():
     """Load M1, resample to the decision timeframe, build the causal feature
     frame.  Shared by load_datasets() (single split) and load_folds() (walk-
     forward) so both modes see byte-identical bars and features."""
-    m1 = load_mt_ohlcv_csv(
-        CFG.csv_path,
-        time_col=CFG.time_col,
-        source_tz=CFG.source_tz,
-        timestamp_is_bar_open=CFG.timestamp_is_bar_open,
-        bar_duration=CFG.pandas_execution_tf,
-        start_date=CFG.start_date,
-        end_date=CFG.end_date,
-        max_days_for_demo=CFG.max_days_for_demo,
-    )
+    m1 = load_ohlcv(CFG)
     decision = resample_ohlcv(m1, CFG.pandas_tf)
     feat, feature_cols = prepare_feature_frame(
         decision,
@@ -144,21 +135,21 @@ class _ConsistencyEvalCallback(BaseCallback):
 
     Standard EvalCallback picks the highest val reward in isolation.  That can
     select a model that got lucky on the val period while being terrible on
-    training data — a sign it never really learned.
+    training data - a sign it never really learned.
 
     This callback evaluates on BOTH a 'train eval' slice (the last ~len(val)
     bars of training data) and the val set.  For each leg it computes a
-    risk-adjusted quality = cumulative_reward − dd_penalty · max_drawdown_pct,
+    risk-adjusted quality = cumulative_reward − dd_penalty . max_drawdown_pct,
     then scores the checkpoint by the *weaker* of the two legs:
 
-        q_leg  = reward_leg − dd_penalty · max_drawdown_pct_leg
+        q_leg  = reward_leg − dd_penalty . max_drawdown_pct_leg
         score  = min(q_train, q_val)
 
-    → rewards models that are simultaneously profitable AND low-drawdown on
+    -> rewards models that are simultaneously profitable AND low-drawdown on
       both sides of the split boundary
-    → anchored by the weaker leg (penalises large train/val gap)
+    -> anchored by the weaker leg (penalises large train/val gap)
 
-    Do-nothing guard: an idle policy makes no trades → flat equity → ~0 DD,
+    Do-nothing guard: an idle policy makes no trades -> flat equity -> ~0 DD,
     which would otherwise look 'perfectly stable' under the penalty.  A
     checkpoint is only eligible to become 'best' when BOTH legs are profitable
     (reward > 0) and place at least `min_trades` trades.
@@ -183,7 +174,7 @@ class _ConsistencyEvalCallback(BaseCallback):
         super().__init__(verbose=verbose)
         self.train_eval_env     = train_eval_env
         self.val_env            = val_env
-        # The live training VecNormalize — snapshotted next to best_model so the
+        # The live training VecNormalize - snapshotted next to best_model so the
         # saved checkpoint is later evaluated under the normalisation it was
         # selected with (the obs_rms drifts as training continues).
         self.train_venv         = train_venv
@@ -212,7 +203,7 @@ class _ConsistencyEvalCallback(BaseCallback):
         )
         reward = float(rewards[0])
 
-        # venv = VecNormalize → .venv = DummyVecEnv → .envs[0] = _CaptureDoneWrapper.
+        # venv = VecNormalize -> .venv = DummyVecEnv -> .envs[0] = _CaptureDoneWrapper.
         # saved_equity/saved_trades were stashed before DummyVecEnv's auto-reset.
         capture = venv.venv.envs[0]
         eq = capture.saved_equity
@@ -266,7 +257,7 @@ class _ConsistencyEvalCallback(BaseCallback):
             # (project invariant: VecNormalize travels with every saved model).
             if self.train_venv is not None:
                 self.train_venv.save(str(self.best_model_save_path / "best_model_vecnorm.pkl"))
-            marker = "  ← BEST"
+            marker = "  <- BEST"
 
         if self.verbose >= 1:
             flag = "" if eligible else "  (ineligible)"
@@ -291,7 +282,7 @@ class _ConsistencyEvalCallback(BaseCallback):
 
 def _linear_schedule(initial_value: float):
     """SB3 learning-rate schedule: decays linearly from initial_value to 0 as
-    training progresses (SB3 passes progress_remaining = 1.0 → 0.0).  Shrinking
+    training progresses (SB3 passes progress_remaining = 1.0 -> 0.0).  Shrinking
     late-training updates keeps an over-fitting tail from overrunning the best
     checkpoint."""
     def schedule(progress_remaining: float) -> float:
@@ -301,31 +292,31 @@ def _linear_schedule(initial_value: float):
 
 def train(
     total_timesteps: int = 2_000_000,
-    # ── timesteps ────────────────────────────────────────────────────────────
+    # -- timesteps ------------------------------------------------------------
     # Normally set by the caller. train_walk_forward() scales this PER FOLD by
     # the fold's train length so every fold makes a similar number of passes
-    # over its data — a fixed budget over-trains the small early folds and
-    # under-trains the large late ones. 2048-step episodes → total/2048 rollouts
-    # × n_epochs minibatch passes each.
-    # ────────────────────────────────────────────────────────────────────────
+    # over its data - a fixed budget over-trains the small early folds and
+    # under-trains the large late ones. 2048-step episodes -> total/2048 rollouts
+    # x n_epochs minibatch passes each.
+    # ------------------------------------------------------------------------
     seed: int = 42,
     out_dir: str = "models",
     train_episode_steps: int = 2048,
     eval_freq: int = 50_000,
     # dd_penalty: reward-units subtracted per 1% of max drawdown in checkpoint
-    # selection.  Higher → prefer stabler (lower-DD) models; too high selects a
+    # selection.  Higher -> prefer stabler (lower-DD) models; too high selects a
     # near-idle policy.  Calibrate against eval_logs/consistency_evals.csv.
     dd_penalty: float = 1.0,
-    # ── Parallelism & device ─────────────────────────────────────────────────
+    # -- Parallelism & device -------------------------------------------------
     # n_envs > 1 uses SubprocVecEnv: near-linear speedup because env simulation
     # (not the network) is the bottleneck.  n_envs=4 on a quad-core CPU gives
-    # ~3.5× faster wall-clock.  Requires the __main__ guard at the bottom.
-    # device="auto" picks CUDA if available; adds ~15–30% on the network side.
+    # ~3.5x faster wall-clock.  Requires the __main__ guard at the bottom.
+    # device="auto" picks CUDA if available; adds ~15-30% on the network side.
     # With n_envs=4 + GPU, effective batch per update = n_steps*n_envs = 8192
-    # → increase batch_size to 512 or 1024 for better GPU utilisation.
+    # -> increase batch_size to 512 or 1024 for better GPU utilisation.
     n_envs: int = 1,
     device: str = "auto",
-    # ────────────────────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------------
     reveal_test: bool = False,
     # Inject pre-built splits (used by train_walk_forward to train one fold).
     # When None, load the single chronological split via load_datasets().
@@ -334,7 +325,7 @@ def train(
     import torch
     from stable_baselines3 import PPO
 
-    # ── Device selection ─────────────────────────────────────────────────────
+    # -- Device selection -----------------------------------------------------
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device : {device}")
@@ -350,7 +341,7 @@ def train(
     train_m1 = _slice_m1_for_decision_window(m1, train_feat)
     val_m1   = _slice_m1_for_decision_window(m1, val_feat)
 
-    # ── Training environments ─────────────────────────────────────────────────
+    # -- Training environments -------------------------------------------------
     if n_envs > 1:
         # SubprocVecEnv spawns n_envs worker processes that step in parallel.
         # partial() wraps a module-level function so it is pickle-safe on Windows.
@@ -363,7 +354,7 @@ def train(
         print(f"Training envs : {n_envs} parallel (SubprocVecEnv, {start_method})")
         train_env_raw = SubprocVecEnv(env_fns, start_method=start_method)
     else:
-        print("Training envs : 1 (DummyVecEnv — set n_envs=4 for ~4x speedup)")
+        print("Training envs : 1 (DummyVecEnv - set n_envs=4 for ~4x speedup)")
         train_env_raw = DummyVecEnv([
             lambda: build_env(train_feat, train_m1, feature_cols,
                               randomize_start=True, episode_steps=train_episode_steps)
@@ -371,7 +362,7 @@ def train(
 
     train_env = VecNormalize(train_env_raw, norm_obs=True, norm_reward=True, clip_obs=10.0)
 
-    # ── Eval environments (deterministic, no reward norm) ─────────────────────
+    # -- Eval environments (deterministic, no reward norm) ---------------------
     # _CaptureDoneWrapper stashes the equity curve before DummyVecEnv's auto-reset
     # wipes it, so the consistency callback can read each episode's max drawdown.
     val_env_raw = DummyVecEnv([
@@ -384,7 +375,7 @@ def train(
 
     # Train-eval slice: the last ~len(val) bars of training data.
     # Using the tail of training (regime just before the embargo) makes the
-    # train/val comparison as fair as possible — same era, different side of
+    # train/val comparison as fair as possible - same era, different side of
     # the split boundary.  Its size matches val so rewards are on the same scale.
     train_eval_feat = train_feat.iloc[-len(val_feat):]
     train_eval_m1   = _slice_m1_for_decision_window(m1, train_eval_feat)
@@ -410,7 +401,7 @@ def train(
 
     # Consistency-based checkpoint selection: saves best model only when the
     # drawdown-penalised score min(q_train, q_val) improves AND both legs are
-    # profitable — favours models that are good and stable on both splits.
+    # profitable - favours models that are good and stable on both splits.
     eval_cb = _ConsistencyEvalCallback(
         train_eval_env=train_eval_env,
         val_env=val_env,
@@ -507,17 +498,17 @@ def train(
     info_path = Path(out_dir) / "run_info.json"
     info_path.write_text(json.dumps(run_info, indent=2))
 
-    print(f"Model      → {model_path}")
-    print(f"VecNorm    → {vecnorm_path}")
-    print(f"Run info   → {info_path}")
+    print(f"Model      -> {model_path}")
+    print(f"VecNorm    -> {vecnorm_path}")
+    print(f"Run info   -> {info_path}")
 
-    # ── Post-training equity chart: in-sample → out-of-sample ───────────────
-    print("\nRunning post-training evaluation (train / val / test) …")
+    # -- Post-training equity chart: in-sample -> out-of-sample ---------------
+    print("\nRunning post-training evaluation (train / val / test) ...")
     if reveal_test:
-        print("\nRunning post-training evaluation (train / val / test) â€¦")
+        print("\nRunning post-training evaluation (train / val / test) ...")
         eval_splits = {"Train": train_feat, "Val": val_feat, "Test": test_feat}
     else:
-        print("\nRunning post-training evaluation (train / val only; test remains sealed) â€¦")
+        print("\nRunning post-training evaluation (train / val only; test remains sealed) ...")
         eval_splits = {"Train": train_feat, "Val": val_feat}
     _post_training_eval(
         model=model,
@@ -569,7 +560,7 @@ def _post_training_eval(
     slug: str,
 ) -> Path:
     """Run the trained model deterministically on every split, chain the equity
-    curves into a single in-sample → out-of-sample plot, and save it to disk."""
+    curves into a single in-sample -> out-of-sample plot, and save it to disk."""
     from visualize import plot_insample_oos_equity, save_html
 
     equities: dict = {}
@@ -581,7 +572,7 @@ def _post_training_eval(
 
         # _CaptureDoneWrapper must sit OUTSIDE Monitor so DummyVecEnv's
         # auto-reset (env.reset()) fires on the wrapper, not on the raw env.
-        # Stack: DummyVecEnv → _CaptureDoneWrapper → Monitor → BracketTradingEnv
+        # Stack: DummyVecEnv -> _CaptureDoneWrapper -> Monitor -> BracketTradingEnv
         def _make(d=decision_df, m=m1_sl):
             return _CaptureDoneWrapper(
                 build_env(d, m, feature_cols, randomize_start=False, episode_steps=None)
@@ -614,11 +605,11 @@ def _post_training_eval(
     fig = plot_insample_oos_equity(
         equities,
         initial_equity=CFG.initial_equity,
-        title=(f"Equity — in-sample vs out-of-sample  [{slug}]"),
+        title=(f"Equity - in-sample vs out-of-sample  [{slug}]"),
     )
     out_path = Path(out_dir) / f"{slug}_equity_insample_oos.html"
     save_html(fig, out_path)
-    print(f"\nEquity chart → {out_path}")
+    print(f"\nEquity chart -> {out_path}")
     return out_path
 
 
@@ -756,17 +747,17 @@ def _finalize_deployment(out_dir: str, fold_k: int, subdir: str, passed: bool) -
     marker = Path(out_dir) / "NO_DEPLOY.txt"
     if passed:
         marker.unlink(missing_ok=True)   # clear any stale marker from a prior run
-        print(f"\n  ✓ GATE PASSED — fold {fold_k} promoted to production at {out_dir}/")
-        print("    run_info.json (gate_passed=true) → best_model/best_model.zip + its vecnorm")
+        print(f"\n  [OK]  GATE PASSED - fold {fold_k} promoted to production at {out_dir}/")
+        print("    run_info.json (gate_passed=true) -> best_model/best_model.zip + its vecnorm")
     else:
         marker.write_text(
             f"Walk-forward consistency gate FAILED.\n"
             f"The best model of the final fold ({fold_k}) IS still saved to "
             f"{out_dir}/best_model/ and referenced by run_info.json "
-            f"(gate_passed=false) — but it is NOT gate-approved for live "
+            f"(gate_passed=false) - but it is NOT gate-approved for live "
             f"deployment. Inspect the per-fold summary before any use.\n"
         )
-        print(f"\n  ✗ GATE FAILED — best model still saved to {out_dir}/best_model/ "
+        print(f"\n  [FAIL]  GATE FAILED - best model still saved to {out_dir}/best_model/ "
               f"(gate_passed=false, NOT approved for deployment).")
         print("    Out-of-sample folds are inconsistent; inspect the summary before using it.")
 
@@ -787,18 +778,18 @@ def train_walk_forward(
 
     Trains an independent PPO model on each rolling fold and scores it on that
     fold's out-of-sample validation window.  The honest generalisation estimate
-    is the *aggregate* of the per-fold metrics — not any single split.
+    is the *aggregate* of the per-fold metrics - not any single split.
 
     Every fold (including the last) trains into ``out_dir/walk_forward/fold_k``.
     After the loop, a consistency gate (see _passes_consistency_gate / config)
-    decides whether to PROMOTE the final fold — the most history, most-recent
-    val window — into the production slot ``out_dir``.  On failure nothing is
+    decides whether to PROMOTE the final fold - the most history, most-recent
+    val window - into the production slot ``out_dir``.  On failure nothing is
     promoted, so final_holdout_eval.py / training_diagnostics.py find no
     production model rather than an overfit one.  The sealed test is untouched.
 
     Per-fold timesteps are scaled by the fold's train length (capped at
     ``total_timesteps`` for the largest fold, floored at ``min_timesteps_per_fold``)
-    so every fold makes a similar number of passes over its data — otherwise the
+    so every fold makes a similar number of passes over its data - otherwise the
     small early folds over-train and the large late ones under-train.  eval_freq
     is derived per fold to hit ~``target_evals_per_fold`` checkpoints.
     """
@@ -814,12 +805,12 @@ def train_walk_forward(
     ]
 
     print("=" * 72)
-    print(f"  WALK-FORWARD VALIDATION — {n_folds} folds"
+    print(f"  WALK-FORWARD VALIDATION - {n_folds} folds"
           f"  ({'anchored / expanding' if CFG.walk_forward_anchored else 'rolling fixed-window'} train)")
     print(f"  budget <= {total_timesteps:,} steps/fold (scaled by train size, floor "
           f"{min_timesteps_per_fold:,}); total ~= {sum(fold_timesteps):,} steps over {n_folds} folds")
     print(f"  envs: {n_envs}   sealed test: {len(test_feat):,} bars"
-          + (f"  ({test_feat.index.min().date()}→{test_feat.index.max().date()})" if len(test_feat) else ""))
+          + (f"  ({test_feat.index.min().date()}->{test_feat.index.max().date()})" if len(test_feat) else ""))
     print("=" * 72)
 
     summary_rows: list[dict] = []
@@ -828,11 +819,11 @@ def train_walk_forward(
         fold_ts = fold_timesteps[k - 1]
         eval_freq_k = max(25_000, fold_ts // target_evals_per_fold)
         passes = fold_ts / max(len(tr), 1)
-        print(f"\n── Fold {k}/{n_folds}"
-              f"  | train {len(tr):,} bars ({tr.index.min().date()}→{tr.index.max().date()})"
-              f"  | val {len(va):,} bars ({va.index.min().date()}→{va.index.max().date()})"
+        print(f"\n-- Fold {k}/{n_folds}"
+              f"  | train {len(tr):,} bars ({tr.index.min().date()}->{tr.index.max().date()})"
+              f"  | val {len(va):,} bars ({va.index.min().date()}->{va.index.max().date()})"
               f"\n   budget {fold_ts:,} steps (~{passes:.0f} passes), eval every "
-              f"{eval_freq_k:,}  → {fold_dir}")
+              f"{eval_freq_k:,}  -> {fold_dir}")
 
         model, _ = train(
             total_timesteps=fold_ts,
@@ -895,7 +886,7 @@ def train_walk_forward(
     print(f"\n  Folds with positive OOS return : {pos}/{n_folds}")
     print(f"  Folds with OOS profit factor>1 : {pf_ok}/{n_folds}")
 
-    # ── Deployment gate ──────────────────────────────────────────────────────
+    # -- Deployment gate ------------------------------------------------------
     passed, detail = _passes_consistency_gate(summary)
     print("\n  Consistency gate:")
     for line in detail:
@@ -906,8 +897,8 @@ def train_walk_forward(
     if not passed:
         print("    Fix upstream (fewer steps / more regularisation / signal) and re-run.")
 
-    print(f"\n  Per-fold summary → {summary_path}")
-    print("  Sealed test remains untouched — reveal once via final_holdout_eval.py.")
+    print(f"\n  Per-fold summary -> {summary_path}")
+    print("  Sealed test remains untouched - reveal once via final_holdout_eval.py.")
     print("=" * 72)
     return summary
 
@@ -940,12 +931,12 @@ def train_sliding_walk_forward(
 
     Each fold trains on ``CFG.sliding_train_years`` of data, selects its
     checkpoint on the next ``CFG.sliding_val_months`` (val), and is judged
-    TRUE out-of-sample on the following ``CFG.sliding_test_months`` (test) — a
+    TRUE out-of-sample on the following ``CFG.sliding_test_months`` (test) - a
     window the model never saw during training OR checkpoint selection.  The
     whole window then slides ``CFG.sliding_step_months`` forward and repeats.
 
     Every fold's test window is stitched into one continuous out-of-sample
-    equity curve (``sliding_oos_equity.csv``) — the realistic backtest of
+    equity curve (``sliding_oos_equity.csv``) - the realistic backtest of
     "retrain every step_months, trade the next test_months live".  The gate and
     aggregate are computed on the TEST metrics (the honest ones), and the final
     (most recent) fold is the deployable model.
@@ -966,20 +957,20 @@ def train_sliding_walk_forward(
     )
     n_folds = len(folds)
     if n_folds == 0:
-        raise ValueError("No sliding folds produced — not enough data for the "
+        raise ValueError("No sliding folds produced - not enough data for the "
                          "chosen train/val/test window. Check CFG.sliding_* / dataset.")
 
     print("=" * 72)
-    print(f"  SLIDING WALK-FORWARD — {n_folds} folds  "
-          f"(train {CFG.sliding_train_years:g}y → val {CFG.sliding_val_months}m → "
+    print(f"  SLIDING WALK-FORWARD - {n_folds} folds  "
+          f"(train {CFG.sliding_train_years:g}y -> val {CFG.sliding_val_months}m -> "
           f"test {CFG.sliding_test_months}m, slide {CFG.sliding_step_months}m)")
-    print(f"  {total_timesteps:,} steps/fold × {n_folds} folds = "
+    print(f"  {total_timesteps:,} steps/fold x {n_folds} folds = "
           f"~{total_timesteps * n_folds:,} env-steps total. envs={n_envs}.")
     print("  Schedule (each row = retrain + 'live' test window):")
     for k, (tr, va, te) in enumerate(folds, start=1):
-        print(f"    fold {k:>2}: train {tr.index.min().date()}→{tr.index.max().date()}"
-              f" | val {va.index.min().date()}→{va.index.max().date()}"
-              f" | TEST {te.index.min().date()}→{te.index.max().date()} ({len(te):,} bars)")
+        print(f"    fold {k:>2}: train {tr.index.min().date()}->{tr.index.max().date()}"
+              f" | val {va.index.min().date()}->{va.index.max().date()}"
+              f" | TEST {te.index.min().date()}->{te.index.max().date()} ({len(te):,} bars)")
     print("=" * 72)
 
     summary_rows: list[dict] = []
@@ -989,9 +980,9 @@ def train_sliding_walk_forward(
     for k, (tr, va, te) in enumerate(folds, start=1):
         fold_dir = str(Path(out_dir) / "sliding" / f"fold_{k}")
         eval_freq_k = max(25_000, total_timesteps // target_evals_per_fold)
-        print(f"\n── Fold {k}/{n_folds}"
+        print(f"\n-- Fold {k}/{n_folds}"
               f"  | train {len(tr):,}  val {len(va):,}  test {len(te):,} bars"
-              f"  | TEST {te.index.min().date()}→{te.index.max().date()}  → {fold_dir}")
+              f"  | TEST {te.index.min().date()}->{te.index.max().date()}  -> {fold_dir}")
 
         train(
             total_timesteps=total_timesteps,
@@ -1038,7 +1029,7 @@ def train_sliding_walk_forward(
     summary_path = Path(out_dir) / "sliding_walk_forward_summary.csv"
     summary.to_csv(summary_path, index=False)
 
-    # ── Stitch every fold's test window into one continuous OOS equity curve ──
+    # -- Stitch every fold's test window into one continuous OOS equity curve --
     running = CFG.initial_equity
     parts = []
     for eq in test_equities:
@@ -1058,7 +1049,7 @@ def train_sliding_walk_forward(
                       periods_per_year=CFG.periods_per_year)["value"].to_dict()
 
     print("\n" + "=" * 72)
-    print("  SLIDING WALK-FORWARD — PER-FOLD TEST (true out-of-sample)")
+    print("  SLIDING WALK-FORWARD - PER-FOLD TEST (true out-of-sample)")
     print("=" * 72)
     show = ["fold", "test_start", "test_end", "test_return_pct", "test_sharpe",
             "test_profit_factor", "test_win_rate_pct", "test_max_dd_pct", "test_n_trades"]
@@ -1073,9 +1064,9 @@ def train_sliding_walk_forward(
     print(f"    Sharpe-like  : {oos.get('sharpe_like'):+.2f}")
     print(f"    max drawdown : {oos.get('max_drawdown_pct'):+.1f}%")
     print(f"    profit factor: {oos.get('profit_factor'):.2f}   trades: {oos.get('n_trades')}")
-    print(f"    curve → {stitched_path}")
+    print(f"    curve -> {stitched_path}")
 
-    # ── Deployment gate on the TEST windows ──────────────────────────────────
+    # -- Deployment gate on the TEST windows ----------------------------------
     passed, detail = _passes_consistency_gate(
         summary, ret_col="test_return_pct",
         pf_col="test_profit_factor", sharpe_col="test_sharpe")
@@ -1086,7 +1077,7 @@ def train_sliding_walk_forward(
     # a failed gate); the gate only sets gate_passed + the NO_DEPLOY marker.
     _finalize_deployment(out_dir, n_folds, "sliding", passed)
 
-    print(f"\n  Per-fold summary → {summary_path}")
+    print(f"\n  Per-fold summary -> {summary_path}")
     print("=" * 72)
     return summary
 

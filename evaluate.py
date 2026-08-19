@@ -12,7 +12,7 @@ def drawdown(equity: pd.Series) -> pd.Series:
 def summarize_equity(equity_df: pd.DataFrame, initial_equity: float = 10_000.0,
                      periods_per_year: int = 252 * 24 * 12) -> dict:
     """
-    periods_per_year for M5 bars: 252 trading days * 24h * 12 bars/h ≈ 72 576.
+    periods_per_year for M5 bars: 252 trading days * 24h * 12 bars/h ~ 72 576.
     XAUUSD trades ~23h/day on 5-day weeks; the default is a conservative upper bound.
     """
     if equity_df.empty:

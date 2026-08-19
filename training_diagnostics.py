@@ -3,9 +3,9 @@ training_diagnostics.py
 -----------------------
 Run after train_ppo.py to assess:
 
-  1. Learning curve  — is the agent actually learning?
-  2. Overfitting     — train / val / test performance gap
-  3. Feature quality — stationarity, variance, predictive signal, collinearity
+  1. Learning curve  - is the agent actually learning?
+  2. Overfitting     - train / val / test performance gap
+  3. Feature quality - stationarity, variance, predictive signal, collinearity
 
 Usage:
     python training_diagnostics.py
@@ -23,9 +23,9 @@ import pandas as pd
 from model_artifacts import load_run_info, resolve_project_path, resolve_sb3_model_path
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 1. Learning curve
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _load_eval_logs(log_dir: Path) -> dict | None:
     path = log_dir / "evaluations.npz"
@@ -66,17 +66,17 @@ def _print_learning_curve(curve: pd.DataFrame) -> None:
     print(f"    Evaluations          : {n}")
     print(f"    First-half avg reward: {first_avg:+.4f}")
     print(f"    Second-half avg reward:{second_avg:+.4f}")
-    print(f"    Δ (2nd - 1st half)   : {delta:+.4f}  "
-          f"{'✓ learning' if delta > 0 else '✗ no improvement detected'}")
-    print(f"    Final mean reward    : {final:+.4f} ± {final_std:.4f}")
+    print(f"    delta (2nd - 1st half)   : {delta:+.4f}  "
+          f"{'[OK]  learning' if delta > 0 else '[FAIL]  no improvement detected'}")
+    print(f"    Final mean reward    : {final:+.4f} +/- {final_std:.4f}")
     print(f"    Tail stability (std) : {tail_std:.4f}  "
-          f"{'✓ stable' if tail_std < abs(final) * 0.3 + 1e-9 else '⚠ unstable'}")
+          f"{'[OK]  stable' if tail_std < abs(final) * 0.3 + 1e-9 else '[WARN]  unstable'}")
     print(f"    Is learning          : {'YES' if delta > 0 else 'NO'}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 2. Overfitting diagnostics
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 _METRICS_OF_INTEREST = [
     "total_return_pct", "annualized_return_pct",
@@ -154,30 +154,30 @@ def _print_overfitting(results: dict[str, dict]) -> None:
     ret_gap_vt = _gap(tr_ret, va_ret)
     ret_gap_te = _gap(tr_ret, te_ret)
     if np.isfinite(ret_gap_vt) and ret_gap_vt < -30:
-        flags.append(f"  ⚠ Val total_return is {ret_gap_vt:.1f}% of train — possible overfit")
+        flags.append(f"  [WARN]  Val total_return is {ret_gap_vt:.1f}% of train - possible overfit")
     if np.isfinite(ret_gap_te) and ret_gap_te < -30:
-        flags.append(f"  ⚠ Test total_return is {ret_gap_te:.1f}% of train — possible overfit")
+        flags.append(f"  [WARN]  Test total_return is {ret_gap_te:.1f}% of train - possible overfit")
 
     tr_pf = train.get("profit_factor", np.nan)
     va_pf = val.get("profit_factor",   np.nan)
     if np.isfinite(tr_pf) and np.isfinite(va_pf) and tr_pf > 1.3 and va_pf < 1.0:
-        flags.append(f"  ⚠ Train PF={tr_pf:.2f} but val PF={va_pf:.2f} < 1.0 — overfit")
+        flags.append(f"  [WARN]  Train PF={tr_pf:.2f} but val PF={va_pf:.2f} < 1.0 - overfit")
 
     tr_sh = train.get("sharpe_like", np.nan)
     va_sh = val.get("sharpe_like",   np.nan)
     sh_gap = _gap(tr_sh, va_sh)
     if np.isfinite(sh_gap) and sh_gap < -40:
-        flags.append(f"  ⚠ Val Sharpe is {sh_gap:.1f}% of train — possible overfit")
+        flags.append(f"  [WARN]  Val Sharpe is {sh_gap:.1f}% of train - possible overfit")
 
     if not flags:
-        flags = ["  ✓ No severe overfitting flags triggered."]
+        flags = ["  [OK]  No severe overfitting flags triggered."]
     for f in flags:
         print(f)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 2b. Walk-forward validation summary
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _print_walk_forward_summary(models_path: Path) -> None:
     """Echo the per-fold walk-forward results written by
@@ -215,13 +215,13 @@ def _print_walk_forward_summary(models_path: Path) -> None:
     if "val_profit_factor" in summary.columns:
         pf_ok = int((summary["val_profit_factor"] > 1.0).sum())
         print(f"  Folds with OOS profit factor>1 : {pf_ok}/{n}")
-    print("  A strategy that only works on some folds has no robust edge —")
+    print("  A strategy that only works on some folds has no robust edge -")
     print("  look for consistency across folds, not one strong fold.")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 3. Feature quality
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _feature_quality(feat: pd.DataFrame, feature_cols: list[str]) -> pd.DataFrame:
     try:
@@ -246,7 +246,7 @@ def _feature_quality(feat: pd.DataFrame, feature_cols: list[str]) -> pd.DataFram
         # Coefficient of variation as a proxy for "does this feature move?"
         cv = std_v / (abs(mean_v) + 1e-12)
 
-        # Predictive signal: Spearman ρ with 1-bar future return.
+        # Predictive signal: Spearman rho with 1-bar future return.
         corr_r = corr_p = np.nan
         if has_scipy:
             common = s.index.intersection(fut_ret.dropna().index)
@@ -277,18 +277,18 @@ def _feature_collinearity_flags(feat: pd.DataFrame, feature_cols: list[str],
             c = corr.iloc[i, j]
             if c >= threshold:
                 flags.append(
-                    f"  |r|={c:.2f}: {feature_cols[i]}  ↔  {feature_cols[j]}"
+                    f"  |r|={c:.2f}: {feature_cols[i]}  <->  {feature_cols[j]}"
                 )
-    return flags or ["  ✓ No collinear pairs found (|r| < 0.85)."]
+    return flags or ["  [OK]  No collinear pairs found (|r| < 0.85)."]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Main
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def run_diagnostics(models_dir: str = "models", reveal_test: bool = False) -> None:
     from config import CFG
-    from data_loader import load_mt_ohlcv_csv, resample_ohlcv, split_train_val_test
+    from data_loader import load_ohlcv, resample_ohlcv, split_train_val_test
     from features import prepare_feature_frame
 
     models_path = Path(models_dir)
@@ -296,10 +296,10 @@ def run_diagnostics(models_dir: str = "models", reveal_test: bool = False) -> No
 
     sep = "=" * 72
     print(sep)
-    print("  RL TRADING — TRAINING DIAGNOSTICS")
+    print("  RL TRADING - TRAINING DIAGNOSTICS")
     print(sep)
 
-    # ── 1. Learning curve ────────────────────────────────────────────────────
+    # -- 1. Learning curve ----------------------------------------------------
     print("\n[1] LEARNING CURVE")
     print("-" * 50)
     logs = _load_eval_logs(eval_log_dir)
@@ -309,18 +309,11 @@ def run_diagnostics(models_dir: str = "models", reveal_test: bool = False) -> No
         curve = _learning_curve_df(logs)
         _print_learning_curve(curve)
 
-    # ── 2. Data + feature quality ────────────────────────────────────────────
+    # -- 2. Data + feature quality --------------------------------------------
     print("\n[2] FEATURE QUALITY")
     print("-" * 50)
-    print("  Loading data …")
-    m1 = load_mt_ohlcv_csv(
-        CFG.csv_path, time_col=CFG.time_col, source_tz=CFG.source_tz,
-        timestamp_is_bar_open=CFG.timestamp_is_bar_open,
-        bar_duration=CFG.pandas_execution_tf,
-        start_date=CFG.start_date, end_date=CFG.end_date,
-        max_days_for_demo=CFG.max_days_for_demo,
-    )
-    from data_loader import resample_ohlcv
+    print("  Loading data ...")
+    m1 = load_ohlcv(CFG)
     decision = resample_ohlcv(m1, CFG.pandas_tf)
     feat, feature_cols = prepare_feature_frame(
         decision, warmup_bars=CFG.warmup_bars,
@@ -348,11 +341,11 @@ def run_diagnostics(models_dir: str = "models", reveal_test: bool = False) -> No
     else:
         print("  None at p=0.05. Expected for efficient intraday markets.")
 
-    print("\n  High-collinearity pairs (|Pearson r| ≥ 0.85):")
+    print("\n  High-collinearity pairs (|Pearson r| >= 0.85):")
     for f in _feature_collinearity_flags(feature_diag_df, feature_cols):
         print(f)
 
-    # ── 3. Overfitting ───────────────────────────────────────────────────────
+    # -- 3. Overfitting -------------------------------------------------------
     print("\n[3] OVERFITTING DIAGNOSTICS")
     print("-" * 50)
 
@@ -361,7 +354,7 @@ def run_diagnostics(models_dir: str = "models", reveal_test: bool = False) -> No
     try:
         _, run_info = load_run_info(models_path)
         # Prefer the best (eligible) checkpoint + its normalisation snapshot so
-        # diagnostics evaluate the SAME model that would be deployed — not the
+        # diagnostics evaluate the SAME model that would be deployed - not the
         # final (typically most-overfit) checkpoint.
         mp_key = "best_model_path" if "best_model_path" in run_info else "model_path"
         vp_key = "best_model_vecnorm_path" if "best_model_vecnorm_path" in run_info else "vecnorm_path"
@@ -391,7 +384,7 @@ def run_diagnostics(models_dir: str = "models", reveal_test: bool = False) -> No
         if vecnorm_path.exists():
             print(f"  VecNormalize stats: {vecnorm_path}")
         else:
-            print("  ⚠ vec_normalize.pkl not found — evaluation will use unnormalized obs.")
+            print("  [WARN]  vec_normalize.pkl not found - evaluation will use unnormalized obs.")
 
         model = PPO.load(str(model_path))
 
@@ -406,7 +399,7 @@ def run_diagnostics(models_dir: str = "models", reveal_test: bool = False) -> No
 
         results = {}
         for name, df in split_frames:
-            print(f"  Evaluating on {name} split …")
+            print(f"  Evaluating on {name} split ...")
             results[name] = _run_split(
                 model, df, _m1_slice(df), feature_cols, vecnorm_path
             )
@@ -421,7 +414,7 @@ def run_diagnostics(models_dir: str = "models", reveal_test: bool = False) -> No
         import traceback
         traceback.print_exc()
 
-    # ── 4. Walk-forward validation ───────────────────────────────────────────
+    # -- 4. Walk-forward validation -------------------------------------------
     print("\n[4] WALK-FORWARD VALIDATION")
     print("-" * 50)
     _print_walk_forward_summary(models_path)

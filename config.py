@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
-# ── Timeframe helpers ────────────────────────────────────────────────────────
+# -- Timeframe helpers --------------------------------------------------------
 
 # Map every common notation (MT4/MT5, shorthand, pandas) to the canonical
 # pandas resample rule.  Add rows here to support new timeframes.
@@ -18,26 +18,65 @@ _TF_TO_PANDAS: dict[str, str] = {
 }
 
 # Approximate trading bars per year for XAUUSD.
-# Basis: 23 trading hours/day × 261 trading days/year
+# Basis: 23 trading hours/day x 261 trading days/year
 # (XAUUSD trades ~Sun 22:00 UTC to Fri 22:00 UTC, minus ~1h daily maintenance)
 _BARS_PER_YEAR: dict[str, int] = {
-    "1min":  360_180,   # 23 × 60 × 261
-    "5min":   72_036,   # 23 × 12 × 261
-    "15min":  24_012,   # 23 × 4  × 261
-    "30min":  12_006,   # 23 × 2  × 261
-    "1h":      6_003,   # 23 × 1  × 261
-    "4h":      1_501,   # 23/4    × 261  (≈ 6 bars/day)
-    "1D":        261,   # 1       × 261
+    "1min":  360_180,   # 23 x 60 x 261
+    "5min":   72_036,   # 23 x 12 x 261
+    "15min":  24_012,   # 23 x 4  x 261
+    "30min":  12_006,   # 23 x 2  x 261
+    "1h":      6_003,   # 23 x 1  x 261
+    "4h":      1_501,   # 23/4    x 261  (~ 6 bars/day)
+    "1D":        261,   # 1       x 261
+}
+
+# Approximate trading bars per year for US stocks/ETFs (e.g. GLD).
+# Basis: NYSE regular session = 6.5 trading hours/day x 252 trading days/year.
+_US_BARS_PER_YEAR: dict[str, int] = {
+    "1min":  98_280,    # 390 x 252
+    "5min":  19_656,    # 78  x 252
+    "15min":  6_552,    # 26  x 252
+    "30min":  3_276,    # 13  x 252
+    "1h":     1_638,    # 6.5 x 252
+    "4h":       410,    # 1.625 x 252
+    "1D":       252,    # 1     x 252
 }
 
 
 @dataclass
 class ProjectConfig:
+    # -- Data source ---------------------------------------------------------
+    # "alpaca" -> download OHLCV from Alpaca Markets using the keys in .env
+    #            (US stocks/ETFs + crypto - XAUUSD is NOT offered by Alpaca,
+    #            so the gold ETF "GLD" is the closest substitute).
+    # "csv"    -> legacy MT4/MT5 file (csv_path below).
+    data_source: str = "alpaca"
+
+    # Alpaca ticker. US stock/ETF (e.g. GLD, SPY, QQQ) or crypto (BTC/USD).
+    alpaca_symbol: str = "GLD"
+
+    # Alpaca data feed.
+    #   "iex" (default) -> free plan, 15-minute delayed quotes/bars.
+    #   "sip"           -> real-time consolidated tape (paid ATS/market data
+    #                     subscription required); keep "iex" otherwise or you
+    #                     get HTTP 403 "subscription does not permit ... SIP".
+    alpaca_feed: str = "iex"
+
+    # Where the first download is cached as alpaca_<SYMBOL>_<rule>.csv so
+    # repeated runs reuse it instead of hitting the API again. None disables.
+    alpaca_cache_dir: Optional[Path] = Path("data")
+
+    # Alpaca labels stock bars with their OPEN timestamp; the pipeline indexes
+    # bars by CLOSE time, so bars are shifted forward by one duration - the
+    # same convention as the MT4 loader. Crypto bars are already close-labelled.
+    alpaca_timestamp_is_bar_open: bool = True
+
     # Path to your full MT4/MT5-style minute CSV.
-    # Long Bid file (May 2003 – May 2026, ~23 years) — primary dataset: enough
+    # Long Bid file (May 2003 - May 2026, ~23 years) - primary dataset: enough
     # history for several walk-forward folds plus a multi-year sealed test.
+    # Only used when data_source == "csv".
     csv_path: Path = Path("data/XAUUSD_1 Min_Bid_2003.05.05_2026.05.31.csv")
-    # Short Ask file (Jan 2020 – Jan 2026, ~6 years) — kept as a fast smoke-test
+    # Short Ask file (Jan 2020 - Jan 2026, ~6 years) - kept as a fast smoke-test
     # dataset; uncomment to fall back to it.
     #csv_path: Path = Path("data/XAUUSD_1 Min_Ask_2020.01.09_2026.01.15.csv")
 
@@ -60,45 +99,45 @@ class ProjectConfig:
     decision_timeframe: str = "H1"
 
     # DEMO MODE: set to None for a full production run.
-    # 90 days ≈ 25 K M5 bars / ~2 K H1 bars. Enough for pipeline smoke-tests
+    # 90 days ~ 25 K M5 bars / ~2 K H1 bars. Enough for pipeline smoke-tests
     # but too small for a publishable result.
     max_days_for_demo: Optional[int] = None
     start_date: Optional[str] = None
     end_date: Optional[str] = None
 
-    # ── Validation scheme ────────────────────────────────────────────────────
+    # -- Validation scheme ----------------------------------------------------
     # Two compatible modes share the SAME sealed final-test segment:
     #
-    #   (a) Single chronological split  → data_loader.split_train_val_test()
+    #   (a) Single chronological split  -> data_loader.split_train_val_test()
     #       train = first train_frac, val = next val_frac, test = remaining.
     #       Used by run_pipeline.py / view_results.py / final_holdout_eval.py.
     #
-    #   (b) Walk-forward (default for RL) → data_loader.make_walk_forward_folds()
+    #   (b) Walk-forward (default for RL) -> data_loader.make_walk_forward_folds()
     #       The last test_frac of bars is sealed as the final holdout; the
     #       remaining "development" region is cut into (n_folds + 1) equal blocks
     #       whose validation windows roll forward in time.  See train_ppo.train_walk_forward().
     #
     # test_frac is kept equal to (1 - train_frac - val_frac) so the sealed test
-    # is byte-for-byte identical in both modes — whichever one produced the model,
+    # is byte-for-byte identical in both modes - whichever one produced the model,
     # final_holdout_eval.py evaluates it on the same untouched holdout.
     #
-    # Long Bid dataset (May 2003 – May 2026, ~23 years of H1 ≈ 138 K bars):
-    #   • single split → ~16 yr train / ~3.5 yr val / ~3.5 yr test
-    #   • walk-forward → 5 folds rolling over the first ~19.5 yr, last ~3.5 yr sealed
+    # Long Bid dataset (May 2003 - May 2026, ~23 years of H1 ~ 138 K bars):
+    #   • single split -> ~16 yr train / ~3.5 yr val / ~3.5 yr test
+    #   • walk-forward -> 5 folds rolling over the first ~19.5 yr, last ~3.5 yr sealed
     train_frac: float = 0.8
     val_frac: float = 0.1
     test_frac: float = 0.1        # sealed final holdout (== 1 - train_frac - val_frac)
 
-    # Walk-forward validation (block scheme — train_ppo.train_walk_forward).
-    n_walk_forward_folds: int = 5       # number of rolling (train → val) folds
+    # Walk-forward validation (block scheme - train_ppo.train_walk_forward).
+    n_walk_forward_folds: int = 5       # number of rolling (train -> val) folds
     walk_forward_anchored: bool = False  # True = expanding train window; False = rolling fixed-size
 
-    # ── Sliding-window walk-forward (realistic retrain simulation) ───────────
+    # -- Sliding-window walk-forward (realistic retrain simulation) -----------
     # train_ppo.train_sliding_walk_forward(): each fold trains on
     # `sliding_train_years`, selects its checkpoint on the next
     # `sliding_val_months`, then is judged TRUE out-of-sample on the following
     # `sliding_test_months`. The whole window then slides forward by
-    # `sliding_step_months` and repeats — simulating "retrain every step_months,
+    # `sliding_step_months` and repeats - simulating "retrain every step_months,
     # then trade the next test_months live." Stitching every fold's test window
     # gives one continuous out-of-sample equity track record.
     #
@@ -112,12 +151,12 @@ class ProjectConfig:
     sliding_test_months: int = 6
     sliding_step_months: int = 6
 
-    # ── Walk-forward deployment gate ─────────────────────────────────────────
+    # -- Walk-forward deployment gate -----------------------------------------
     # After the folds finish, the final fold is promoted to the production slot
     # (models/) ONLY if the out-of-sample folds are consistently good. Otherwise
     # nothing ships: the artifacts stay quarantined under models/walk_forward/
     # and any stale models/run_info.json is set aside as run_info.NO_DEPLOY.json.
-    # The gate only ever PREVENTS a bad deploy — it never fabricates one.
+    # The gate only ever PREVENTS a bad deploy - it never fabricates one.
     min_consistent_folds: int = 4              # folds needing return>0 AND PF>gate_min_profit_factor
     gate_min_profit_factor: float = 1.0        # a fold "passes" when its val PF exceeds this
     gate_worst_fold_min_pf: float = 0.9        # AND no single fold's val PF may fall below this
@@ -148,14 +187,14 @@ class ProjectConfig:
     holding_penalty: float = 0.00002
     reward_mtm_weight: float = 0.01
 
-    # ── PPO regularisation (generalisation-first preset) ─────────────────────
+    # -- PPO regularisation (generalisation-first preset) ---------------------
     # The knobs that most directly control overfitting. Tune these between runs.
     # Rationale: the thin XAUUSD signal lets PPO memorise the train period if it
-    # over-optimises, so this preset trains "softer" — more exploration, fewer
-    # passes per rollout, a KL brake, a decaying LR, and explicit weight decay —
+    # over-optimises, so this preset trains "softer" - more exploration, fewer
+    # passes per rollout, a KL brake, a decaying LR, and explicit weight decay -
     # and leans on the best-checkpoint selector to stop before the late collapse.
     ppo_learning_rate: float = 6e-5
-    ppo_lr_schedule: str = "linear"        # "linear" decays LR → 0 over training; "constant" holds it
+    ppo_lr_schedule: str = "linear"        # "linear" decays LR -> 0 over training; "constant" holds it
     ppo_ent_coef: float = 0.03             # entropy bonus: higher = more exploration, less brittle policy
     ppo_n_epochs: int = 5                  # SGD passes per rollout: fewer = less per-batch memorisation
     ppo_clip_range: float = 0.1            # PPO trust region (kept tight)
@@ -171,7 +210,7 @@ class ProjectConfig:
     # Plotting.
     plot_bars: int = 500
 
-    # ── Derived / read-only properties ──────────────────────────────────────
+    # -- Derived / read-only properties --------------------------------------
 
     @property
     def pandas_tf(self) -> str:
@@ -202,10 +241,11 @@ class ProjectConfig:
 
     @property
     def periods_per_year(self) -> int:
-        """Trading bars per year at decision_timeframe — used for annualising
+        """Trading bars per year at decision_timeframe - used for annualising
         Sharpe, Sortino, Calmar.  Derived from _BARS_PER_YEAR lookup so it
         automatically adjusts when you change decision_timeframe."""
-        return _BARS_PER_YEAR.get(self.pandas_tf, 6_003)
+        table = _US_BARS_PER_YEAR if self.data_source == "alpaca" else _BARS_PER_YEAR
+        return table.get(self.pandas_tf, 6_003)
 
 
 CFG = ProjectConfig()

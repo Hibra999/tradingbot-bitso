@@ -78,7 +78,7 @@ class BracketTradingEnv(gym.Env):
 
         # Pre-extract M1 high/low as contiguous numpy arrays and cache the
         # sorted DatetimeIndex for O(log n) searchsorted lookups.
-        # This replaces the O(n) boolean-mask scan on every step — with 1.5 M
+        # This replaces the O(n) boolean-mask scan on every step - with 1.5 M
         # M1 bars the speedup is ~100-200x per step.
         self._m1_high  = self.m1_df["High"].to_numpy(dtype=np.float64)
         self._m1_low   = self.m1_df["Low"].to_numpy(dtype=np.float64)

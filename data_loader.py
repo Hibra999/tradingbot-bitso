@@ -110,6 +110,52 @@ def load_mt_ohlcv_csv(
     return df
 
 
+def load_ohlcv(
+    cfg=None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    max_days_for_demo: Optional[int] = None,
+) -> pd.DataFrame:
+    """Load OHLCV from the configured data source.
+
+    ``cfg.data_source == "alpaca"`` downloads bars from Alpaca Markets using the
+    keys in ``.env`` (see :mod:`alpaca_data`); ``"csv"`` falls back to the legacy
+    MT4/MT5 file.  Returns the same contract in both cases: a timezone-aware
+    DataFrame indexed by bar CLOSE time with Open/High/Low/Close/Volume.
+    """
+    if cfg is None:  # deferred import avoids a cycle at module load time
+        from config import CFG
+        cfg = CFG
+
+    start_date = cfg.start_date if start_date is None else start_date
+    end_date = cfg.end_date if end_date is None else end_date
+    max_days_for_demo = cfg.max_days_for_demo if max_days_for_demo is None else max_days_for_demo
+
+    if cfg.data_source == "alpaca":
+        from alpaca_data import load_alpaca_ohlcv
+        return load_alpaca_ohlcv(
+            symbol=cfg.alpaca_symbol,
+            pandas_rule=cfg.pandas_execution_tf,
+            start_date=start_date,
+            end_date=end_date,
+            max_days_for_demo=max_days_for_demo,
+            cache_dir=cfg.alpaca_cache_dir,
+            timestamp_is_bar_open=cfg.alpaca_timestamp_is_bar_open,
+            feed=cfg.alpaca_feed,
+        )
+
+    return load_mt_ohlcv_csv(
+        cfg.csv_path,
+        time_col=cfg.time_col,
+        source_tz=cfg.source_tz,
+        timestamp_is_bar_open=cfg.timestamp_is_bar_open,
+        bar_duration=cfg.pandas_execution_tf,
+        start_date=start_date,
+        end_date=end_date,
+        max_days_for_demo=max_days_for_demo,
+    )
+
+
 def resample_ohlcv(df: pd.DataFrame, rule: str = "5min") -> pd.DataFrame:
     """Resample OHLCV while preserving timezone-aware index."""
     out = df.resample(rule, label="right", closed="right").agg({
@@ -177,8 +223,8 @@ def make_walk_forward_folds(
     Fold ``k`` (1‥n_folds) validates on block ``k`` and trains on the blocks
     before it::
 
-        anchored=True   → train = blocks[0 … k-1]   (expanding window)
-        anchored=False  → train = block  [k-1]       (rolling fixed window)
+        anchored=True   -> train = blocks[0 ... k-1]   (expanding window)
+        anchored=False  -> train = block  [k-1]       (rolling fixed window)
 
     ``embargo_bars`` are dropped on each side of every train/val boundary so
     EWM-based features cannot leak information across the cut.
@@ -193,7 +239,7 @@ def make_walk_forward_folds(
     Returns
     -------
     folds : list[tuple[DataFrame, DataFrame]]
-        ``[(train_0, val_0), (train_1, val_1), …]`` in chronological order.
+        ``[(train_0, val_0), (train_1, val_1), ...]`` in chronological order.
     test : DataFrame
         The sealed final-test segment (never used for training or selection).
     """
@@ -242,12 +288,12 @@ def make_sliding_folds(
     Simulates periodic retraining.  Each fold is::
 
         train = [t0,            t0 + train_years)
-        val   = [train_end,     + val_months)     ← checkpoint selection
-        test  = [val_end,       + test_months)    ← TRUE out-of-sample
+        val   = [train_end,     + val_months)     <- checkpoint selection
+        test  = [val_end,       + test_months)    <- TRUE out-of-sample
 
     then ``t0`` advances by ``step_months`` and the whole window slides forward.
     With ``step_months == test_months`` the test windows are contiguous, so
-    stitching them yields one continuous out-of-sample track record — exactly the
+    stitching them yields one continuous out-of-sample track record - exactly the
     "retrain every step_months, trade the next test_months" live workflow.
 
     ``embargo_bars`` are purged at the START of the val and test windows so the
@@ -256,7 +302,7 @@ def make_sliding_folds(
     Returns
     -------
     list[tuple[DataFrame, DataFrame, DataFrame]]
-        ``[(train, val, test), …]`` in chronological order.  Only folds whose
+        ``[(train, val, test), ...]`` in chronological order.  Only folds whose
         full test window fits within the data are returned, so every fold is a
         complete train / val / test triple.
     """

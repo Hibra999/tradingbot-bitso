@@ -1,13 +1,12 @@
-# XAUUSD M1 → RL-ready feature + bracket-trading pipeline
+# GLD (US ETF) M1 → RL-ready feature + bracket-trading pipeline
 
-This project is built for MT4/MT5-style XAUUSD minute data such as:
+> **Data source: Alpaca** — the pipeline now downloads OHLCV from
+> [Alpaca Markets](https://alpaca.markets) instead of expecting a local
+> MT4/MT5 CSV. Alpaca does not offer XAUUSD, so the default symbol is **GLD**
+> (the gold ETF, the closest US-market substitute). Stocks/ETFs and crypto
+> (e.g. `BTC/USD`) are supported.
 
-```csv
-Time (EET),Open,High,Low,Close,Volume
-2020.01.09 01:00:00,1557.152,1557.452,1555.202,1555.302,0.045
-```
-
-It gives you a complete research pipeline:
+This project gives you a complete research pipeline:
 
 1. Load and validate raw M1 data.
 2. Parse broker/EET time safely.
@@ -25,13 +24,21 @@ It gives you a complete research pipeline:
 pip install -r requirements.txt
 ```
 
-Put your full file here (the long Bid history is the primary dataset; the short
-Ask file is kept as a fast smoke-test fallback — switch between them in `config.py`):
+1. Create an Alpaca account (free), then in **Paper Trading → API Keys** grab
+   your key pair.
+2. Open `.env` (copy from `.env.example` if it does not exist) and paste your
+   keys:
 
-```text
-data/XAUUSD_1 Min_Bid_2003.05.05_2026.05.31.csv   # primary (~23 years)
-data/XAUUSD_1 Min_Ask_2020.01.09_2026.01.15.csv   # smoke-test fallback (~6 years)
-```
+   ```text
+   ALPACA_API_KEY=PKxxxxxxxxxxxxxxxx
+   ALPACA_SECRET_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   ```
+
+   The `.env` file is git-ignored; never commit it.
+
+3. Configure the symbol/range in `config.py` (defaults: `GLD`, M1 execution /
+   H1 decision, from 2020-01-01 to today; the first download is cached under
+   `data/alpaca_GLD_1min.csv`).
 
 Then run:
 
@@ -63,8 +70,16 @@ notebooks/XAUUSD_RL_Pipeline_Demo.ipynb
 
 ## Important defaults
 
-- `SOURCE_TZ = Europe/Helsinki`, because many brokers label server time as EET/EEST.
-- MT4/MT5 M1 timestamps are treated as candle-open timestamps and shifted to candle-close timestamps before resampling/backtesting.
+- `data_source = "alpaca"` in `config.py`: OHLCV comes from Alpaca (symbol `GLD`,
+  cached in `data/`); set it to `"csv"` to go back to reading an MT4/MT5 file.
+- Alpaca bar timestamps are bar-*open*; they are shifted to bar-*close* before
+  resampling/backtesting (same convention the MT4 loader used).
+- The data index is UTC (Alpaca timezone), whereas the old CSV path used
+  Europe/Helsinki. `SOURCE_TZ` still applies to the CSV fallback only.
+- Annualisation (`periods_per_year`) automatically switches to US-stock bars
+  per year (6.5 h/day, 252 days) when `data_source = "alpaca"`.
+- `spread_price`/`slippage_price` defaults were tuned for XAUUSD price levels;
+  for GLD (~$200–$300) you may want to shrink them in `config.py`.
 - `DECISION_TIMEFRAME = H1`, while M1 is retained for intrabar TP/SL simulation.
 - Features are causal and mostly stationary: ATR-normalized distances, ratios, session flags, candle shape ratios.
 - The observation set is **25 features**. Four redundant ones were dropped in the 2026-06-02 collinearity audit (`rsi_centered`, `roc5_atr`, `body_atr`, `ema50_slope5_atr`); each was |r| ≥ 0.96 with a retained feature (two were exact duplicates). The underlying `ema20/50/200` columns are still computed for the baselines and charts.
@@ -78,8 +93,9 @@ notebooks/XAUUSD_RL_Pipeline_Demo.ipynb
 
 ## Files
 
-- `config.py`: all main parameters.
-- `data_loader.py`: CSV parsing, timezone handling, validation, resampling.
+- `config.py`: all main parameters (data source, symbol, timeframes, validation, PPO).
+- `alpaca_data.py`: Alpaca Markets downloader with pagination + local CSV cache.
+- `data_loader.py`: data-source dispatch (`load_ohlcv`), CSV parsing, timezone handling, validation, resampling.
 - `features.py`: causal indicators and stationary feature matrix.
 - `leakage_checks.py`: simple future-append stability test.
 - `env_bracket.py`: Gymnasium-compatible bracket trading environment.
@@ -87,6 +103,6 @@ notebooks/XAUUSD_RL_Pipeline_Demo.ipynb
 - `evaluate.py`: metrics, trade-log summary, drawdown.
 - `visualize.py`: Plotly visualization functions.
 - `train_ppo.py`: optional PPO training scaffold.
-- `run_pipeline.py`: one-command pre-test pipeline with validation-only outputs.
+- `run_pipeline.py`: one-command pre-test pipeline with validation-only outputs. Prints CUDA/GPU status, shows a progress bar for every step, and writes a single combined HTML report at `outputs/00_combined_report.html` alongside the per-chart files.
 - `final_holdout_eval.py`: explicit one-time holdout evaluation entry point.
 - `notebooks/XAUUSD_RL_Pipeline_Demo.ipynb`: guided notebook.

@@ -4,11 +4,12 @@ from dataclasses import asdict
 from pathlib import Path
 
 import pandas as pd
+from tqdm import tqdm
 
 from config import CFG
 from data_loader import (
     describe_data,
-    load_mt_ohlcv_csv,
+    load_ohlcv,
     make_walk_forward_folds,
     resample_ohlcv,
     split_train_val_test,
@@ -29,7 +30,27 @@ from visualize import (
     plot_sessions_by_hour,
     plot_trades_on_chart,
     save_html,
+    save_html_combined,
 )
+
+
+def _print_cuda_status() -> None:
+    """Report whether an NVIDIA GPU is available for PPO training."""
+    try:
+        import torch
+    except ImportError:
+        print("PyTorch not installed - RL training (train_ppo.py) unavailable.")
+        return
+    if torch.cuda.is_available():
+        print(
+            f"CUDA detected: {torch.cuda.get_device_name(0)} "
+            f"(torch {torch.__version__}) - RL training will use the GPU."
+        )
+    else:
+        print(
+            f"CUDA not detected (torch {torch.__version__}). "
+            "PPO training would fall back to CPU."
+        )
 
 
 def _slice_m1_for_decision_window(m1_df, decision_df):
@@ -68,7 +89,7 @@ def _walk_forward_baseline(feat, m1, feature_cols, policy_fn, label):
     """Evaluate a fixed (untrained) baseline policy on every walk-forward
     validation window and return a per-fold metrics frame.  Baselines have no
     fitted parameters, so this measures regime-to-regime *stability* across the
-    rolling out-of-sample windows — the same sealed test is excluded throughout.
+    rolling out-of-sample windows - the same sealed test is excluded throughout.
     """
     folds, _test = make_walk_forward_folds(
         feat,
@@ -78,26 +99,29 @@ def _walk_forward_baseline(feat, m1, feature_cols, policy_fn, label):
         anchored=CFG.walk_forward_anchored,
     )
     rows = []
-    for k, (_train_df, val_df) in enumerate(folds, start=1):
-        val_m1 = _slice_m1_for_decision_window(m1, val_df)
-        _eq, _trades, report = evaluate_policy(
-            _make_env(val_df, val_m1, feature_cols),
-            policy_fn,
-            initial_equity=CFG.initial_equity,
-            periods_per_year=CFG.periods_per_year,
-        )
-        metrics = report["value"].to_dict()
-        rows.append({
-            "policy": label,
-            "fold": k,
-            "val_start": val_df.index.min().date(),
-            "val_end": val_df.index.max().date(),
-            "val_return_pct": metrics.get("total_return_pct"),
-            "val_profit_factor": metrics.get("profit_factor"),
-            "val_win_rate_pct": metrics.get("win_rate_pct"),
-            "val_max_dd_pct": metrics.get("max_drawdown_pct"),
-            "val_n_trades": metrics.get("n_trades"),
-        })
+    with tqdm(total=len(folds), desc=f"Walk-forward {label}", unit="fold",
+              leave=False, ncols=100) as pbar:
+        for k, (_train_df, val_df) in enumerate(folds, start=1):
+            val_m1 = _slice_m1_for_decision_window(m1, val_df)
+            _eq, _trades, report = evaluate_policy(
+                _make_env(val_df, val_m1, feature_cols),
+                policy_fn,
+                initial_equity=CFG.initial_equity,
+                periods_per_year=CFG.periods_per_year,
+            )
+            metrics = report["value"].to_dict()
+            rows.append({
+                "policy": label,
+                "fold": k,
+                "val_start": val_df.index.min().date(),
+                "val_end": val_df.index.max().date(),
+                "val_return_pct": metrics.get("total_return_pct"),
+                "val_profit_factor": metrics.get("profit_factor"),
+                "val_win_rate_pct": metrics.get("win_rate_pct"),
+                "val_max_dd_pct": metrics.get("max_drawdown_pct"),
+                "val_n_trades": metrics.get("n_trades"),
+            })
+            pbar.update(1)
     return pd.DataFrame(rows)
 
 
@@ -105,22 +129,28 @@ def main():
     out_dir = Path("outputs")
     out_dir.mkdir(exist_ok=True)
 
-    print("Loading M1 data...")
-    m1 = load_mt_ohlcv_csv(
-        CFG.csv_path,
-        time_col=CFG.time_col,
-        source_tz=CFG.source_tz,
-        timestamp_is_bar_open=CFG.timestamp_is_bar_open,
-        bar_duration=CFG.pandas_execution_tf,
-        start_date=CFG.start_date,
-        end_date=CFG.end_date,
-        max_days_for_demo=CFG.max_days_for_demo,
-    )
-    print(describe_data(m1))
+    _print_cuda_status()
 
+    total_steps = 8
+    pbar = tqdm(total=total_steps, desc="Pipeline", unit="step", ncols=100)
+    pbar.write("Pipeline started - data source: %s (%s)" % (
+        CFG.data_source, CFG.alpaca_symbol if CFG.data_source == "alpaca" else CFG.csv_path))
+
+    # 1/8 Load data
+    pbar.set_description("1/8 Load data")
+    print("Loading M1 data...")
+    try:
+        m1 = load_ohlcv(CFG)
+    except Exception as exc:
+        pbar.close()
+        raise
+    print(describe_data(m1))
+    pbar.update(1)
+
+    # 2/8 Resample + features
+    pbar.set_description("2/8 Resample + features")
     print(f"Resampling to decision timeframe: {CFG.decision_timeframe}  ({CFG.pandas_tf})")
     decision = resample_ohlcv(m1, CFG.pandas_tf)
-
     print("Building causal stationary features...")
     feat, feature_cols = prepare_feature_frame(
         decision,
@@ -130,7 +160,10 @@ def main():
     )
     print(f"Decision bars after warmup: {len(feat):,}")
     print(f"Feature count: {len(feature_cols)}")
+    pbar.update(1)
 
+    # 3/8 Split + leakage check
+    pbar.set_description("3/8 Split + leakage check")
     train_feat, val_feat, test_feat = split_train_val_test(
         feat,
         train_frac=CFG.train_frac,
@@ -151,7 +184,10 @@ def main():
             atr_period=CFG.atr_period, rsi_period=CFG.rsi_period,
         )
         print("Leakage check passed: appending future bars did not change past features.")
+    pbar.update(1)
 
+    # 4/8 Baseline search
+    pbar.set_description("4/8 Baseline search")
     print("Searching for a more stable trend baseline on the train/validation splits...")
     train_m1 = _slice_m1_for_decision_window(m1, train_feat)
     val_m1 = _slice_m1_for_decision_window(m1, val_feat)
@@ -166,10 +202,13 @@ def main():
     )
     print(f"Selected params: {best_params}")
     search_df.to_csv(out_dir / "policy_search.csv", index=False)
+    pbar.update(1)
 
     print("Test split remains sealed during the default pipeline run.")
     print("Use final_holdout_eval.py after the model/policy is frozen.")
 
+    # 5/8 Evaluate policies
+    pbar.set_description("5/8 Evaluate policies")
     selected_policy = make_trend_hold_policy(best_params)
     baseline_train_eq, baseline_train_trades, baseline_train_report = evaluate_policy(
         _make_env(train_feat, train_m1, feature_cols),
@@ -195,7 +234,10 @@ def main():
         initial_equity=CFG.initial_equity,
         periods_per_year=CFG.periods_per_year,
     )
+    pbar.update(1)
 
+    # 6/8 Save artifacts (CSV)
+    pbar.set_description("6/8 Save artifacts")
     selected_params = asdict(best_params)
     selected_params["sl_atr_multiplier"] = CFG.sl_atr_multipliers[best_params.sl_idx]
     selected_params["tp_r_multiplier"] = CFG.tp_r_multipliers[best_params.tp_idx]
@@ -214,8 +256,10 @@ def main():
     performance_df.to_csv(out_dir / "performance_report.csv", index=False)
     selected_val_trades.to_csv(out_dir / "selected_val_trade_log.csv", index=False)
     selected_val_eq.to_csv(out_dir / "selected_val_equity_curve.csv")
+    pbar.update(1)
 
-    # ── Walk-forward baseline robustness (validation windows only; test sealed) ──
+    # 7/8 Walk-forward baseline robustness (validation windows only; test sealed)
+    pbar.set_description("7/8 Walk-forward robustness")
     print(
         f"\nWalk-forward baseline robustness "
         f"({CFG.n_walk_forward_folds} folds, "
@@ -237,17 +281,47 @@ def main():
             f"mean val_return={grp['val_return_pct'].mean():+.1f}%, "
             f"mean PF={grp['val_profit_factor'].mean():.2f}"
         )
+    pbar.update(1)
 
+    # 8/8 Build plots + single combined HTML report
+    pbar.set_description("8/8 Build report")
     print("Saving Plotly visuals...")
     pretest_feat = pd.concat([train_feat, val_feat]).sort_index()
     pretest_decision = decision.loc[:val_feat.index.max()]
-    save_html(plot_candles_with_indicators(val_feat, n=CFG.plot_bars, title="Validation candles with causal indicators"), out_dir / "01_val_candles_indicators.html")
-    save_html(plot_sessions_by_hour(pretest_decision, title="XAUUSD behavior by broker/server hour (train+val only)"), out_dir / "02_pretest_sessions_by_hour.html")
-    save_html(plot_feature_correlation(pretest_feat, feature_cols), out_dir / "03_pretest_feature_correlation.html")
-    save_html(plot_trades_on_chart(val_feat, selected_val_trades, n=CFG.plot_bars, title="Selected trend-hold validation trades with TP/SL brackets"), out_dir / "04_val_trades_on_chart.html")
-    save_html(plot_equity_and_drawdown(selected_val_eq, title="Selected trend-hold validation equity & drawdown"), out_dir / "05_val_equity_drawdown.html")
 
-    print(f"Done. Open the HTML files in: {out_dir.resolve()}")
+    figures = [
+        ("1. Validation candles + causal indicators",
+         plot_candles_with_indicators(val_feat, n=CFG.plot_bars, title="Validation candles with causal indicators")),
+        ("2. Price/volume behaviour by hour (train+val only)",
+         plot_sessions_by_hour(pretest_decision, title="Price/volume behaviour by hour (train+val only)")),
+        ("3. Feature correlation heatmap",
+         plot_feature_correlation(pretest_feat, feature_cols)),
+        ("4. Selected trend-hold validation trades with TP/SL brackets",
+         plot_trades_on_chart(val_feat, selected_val_trades, n=CFG.plot_bars,
+                              title="Selected trend-hold validation trades with TP/SL brackets")),
+        ("5. Selected trend-hold validation equity & drawdown",
+         plot_equity_and_drawdown(selected_val_eq, title="Selected trend-hold validation equity & drawdown")),
+    ]
+    chart_paths = [
+        out_dir / "01_val_candles_indicators.html",
+        out_dir / "02_pretest_sessions_by_hour.html",
+        out_dir / "03_pretest_feature_correlation.html",
+        out_dir / "04_val_trades_on_chart.html",
+        out_dir / "05_val_equity_drawdown.html",
+    ]
+    for fig, path in tqdm(zip([f for _, f in figures], chart_paths),
+                           desc="Writing chart files", total=len(figures), unit="chart",
+                           leave=False, ncols=100):
+        save_html(fig, path)
+
+    combined_path = out_dir / "00_combined_report.html"
+    save_html_combined(figures, combined_path,
+                       title="RL Trading - Pipeline Report (GLD / Alpaca)")
+    pbar.update(1)
+    pbar.close()
+
+    print(f"Done. Report and charts in: {out_dir.resolve()}")
+    print(f"Combined (single file): {combined_path.resolve()}")
 
 
 if __name__ == "__main__":

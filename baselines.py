@@ -167,7 +167,7 @@ def optimize_trend_hold_policy(
         va_ret = val_metrics.get("total_return_pct", float("nan"))
         tr_pf  = train_metrics.get("profit_factor",   float("nan"))
         va_pf  = val_metrics.get("profit_factor",     float("nan"))
-        marker = " ← best" if score > best_score else ""
+        marker = " <- best" if score > best_score else ""
         print(
             f"         score={score:+.2f}  "
             f"train_ret={tr_ret:+.1f}%  val_ret={va_ret:+.1f}%  "

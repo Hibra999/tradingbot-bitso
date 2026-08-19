@@ -89,16 +89,16 @@ def add_stationary_features(df: pd.DataFrame, atr_period: int = 14, rsi_period: 
     out["close_ema200_atr"] = (out["Close"] - out["ema200"]) / (a + eps)
     out["ema20_ema50_atr"] = (out["ema20"] - out["ema50"]) / (a + eps)
     # DROPPED (collinearity audit 2026-06-02): |r|=0.96 with close_ema50_atr and
-    # 0.93 with ema20_ema50_atr — the EMA-distance features already encode trend
+    # 0.93 with ema20_ema50_atr - the EMA-distance features already encode trend
     # slope, so this added redundant capacity that helped the agent overfit.
     # out["ema50_slope5_atr"] = (out["ema50"] - out["ema50"].shift(5)) / (a + eps)
 
     # Momentum.
-    # DROPPED: |r|=0.98 with close_ema20_atr (0.95 with close_ema50_atr) — RSI vs
+    # DROPPED: |r|=0.98 with close_ema20_atr (0.95 with close_ema50_atr) - RSI vs
     # the mid-distance carried essentially the same information on this data.
     # out["rsi_centered"] = out["rsi14"] - 50.0
     out["macd_hist_atr"] = out["macd_hist"] / (a + eps)
-    # DROPPED: |r|=1.00 with ret5_atr — roc5_atr is the identical formula
+    # DROPPED: |r|=1.00 with ret5_atr - roc5_atr is the identical formula
     # ((Close - Close.shift(5)) / atr), so it was a pure duplicate of ret5_atr.
     # out["roc5_atr"] = (out["Close"] - out["Close"].shift(5)) / (a + eps)
     out["roc20_atr"] = (out["Close"] - out["Close"].shift(20)) / (a + eps)
@@ -111,7 +111,7 @@ def add_stationary_features(df: pd.DataFrame, atr_period: int = 14, rsi_period: 
     out["bb_width_close"] = out["bb_width"] / out["Close"]
 
     # Candle shape.
-    # DROPPED: |r|=1.00 with ret1_atr — on a gapless intraday series Open[t] ≈
+    # DROPPED: |r|=1.00 with ret1_atr - on a gapless intraday series Open[t] ~
     # Close[t-1], so body (Close-Open) and the 1-bar return were duplicates.
     # out["body_atr"] = (out["Close"] - out["Open"]) / (a + eps)
     out["range_atr"] = (out["High"] - out["Low"]) / (a + eps)
