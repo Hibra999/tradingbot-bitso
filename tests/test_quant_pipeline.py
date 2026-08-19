@@ -61,6 +61,7 @@ class QuantPipelineTests(unittest.TestCase):
             manifest = json.loads(path.with_suffix(".pkl.manifest.json").read_text())
             self.assertEqual(manifest["feature_order"], list(pipeline.feature_order))
             self.assertIn("hmm", manifest)
+            self.assertEqual(len(manifest["hmm"]["input_scale"]), 3)
             restored = CausalFeaturePipeline.load(path)
             pd.testing.assert_frame_equal(past, restored.transform(first, history_context=training))
 

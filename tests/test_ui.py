@@ -59,6 +59,14 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queue.qsize(), 2)
         self.assertEqual((await queue.get())["payload"]["api_token"], "[redacted]")
 
+    async def test_kill_is_latched_against_api_restart(self) -> None:
+        response = await self.client.post("/api/kill", headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertLess(response.json()["dispatch_latency_ms"], 500)
+        response = await self.client.post("/api/lifecycle", headers=self.headers, json={"action": "start"})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.controller.state()["lifecycle"], "killed")
+
 
 if __name__ == "__main__":
     unittest.main()

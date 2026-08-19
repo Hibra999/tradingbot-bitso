@@ -57,6 +57,8 @@ class RiskManager:
         ):
             raise PermissionError("shorting requires flags plus confirmed account/book margin capability")
         value = price * quantity
+        if rules.tick_size <= 0 or price % rules.tick_size:
+            raise ValueError("price violates book tick size")
         if not rules.minimum_amount <= quantity <= rules.maximum_amount:
             raise ValueError("quantity violates book limits")
         if not rules.minimum_price <= price <= rules.maximum_price:

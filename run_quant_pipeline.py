@@ -24,7 +24,7 @@ def main() -> int:
     from config import AppConfig, ValidationConfig
     from data import load_alpaca_ohlcv, resample_ohlcv
     from rl import CandidateRun, SB3CandidateRunner, TrainingEngine
-    from telegram_bot import generate_report
+    from telegram_bot.reports import generate_report
     from validation import moving_block_monte_carlo
 
     load_dotenv()

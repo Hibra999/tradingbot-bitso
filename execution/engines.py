@@ -4,7 +4,7 @@ import asyncio
 import time
 import uuid
 from dataclasses import asdict, dataclass
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import Any, Literal
 
 from config import RuntimeRiskParams
@@ -173,19 +173,38 @@ class PaperExecutionEngine(BaseExecutionEngine):
                 fill.average_price + stop_distance * intent.tp_sl_ratio,
                 origin,
             )
+            self.bracket = Bracket(
+                intent.book,
+                origin,
+                None,
+                self.position.take_profit_price,
+                self.position.stop_price,
+                fill.quantity,
+            )
             self.journal.append("paper_entry", {"book": intent.book, "quantity": fill.quantity, "price": fill.average_price, "fee": fee})
             self.persist()
             return fill
 
-    async def _close_position(self) -> DepthFill | None:
+    async def _close_position(self, reason: str = "signal") -> DepthFill | None:
         if not self.position:
             return None
         fill = consume_depth(self.books[self.position.book], "sell", self.position.quantity)
         self.equity += fill.notional * (Decimal("1") - self.fee_rate)
-        self.journal.append("paper_exit", {"book": self.position.book, "quantity": fill.quantity, "price": fill.average_price})
+        self.journal.append("paper_exit", {"book": self.position.book, "quantity": fill.quantity, "price": fill.average_price, "reason": reason})
         self.position = self.bracket = None
         self.persist()
         return fill
+
+    async def trigger_bracket(self, executable_price: Decimal) -> bool:
+        async with self._order_lock:
+            if not self.position:
+                return False
+            stop = executable_price <= self.position.stop_price if self.position.direction == 1 else executable_price >= self.position.stop_price
+            take_profit = executable_price >= self.position.take_profit_price if self.position.direction == 1 else executable_price <= self.position.take_profit_price
+            if not (stop or take_profit):
+                return False
+            await self._close_position("stop" if stop else "take_profit")
+            return True
 
     async def cancel_order(self, order_id: str) -> None:
         self.open_order_ids.discard(order_id)
@@ -251,8 +270,9 @@ class LiveExecutionEngine(BaseExecutionEngine):
             raise RuntimeError("unmanaged existing orders must be reconciled before startup")
         if self.approved_manifest.get("schema_version") != 1 or not self.approved_manifest.get("selected_artifact"):
             raise RuntimeError("approved model manifest schema is invalid")
-        self.enabled = True
-        self.frozen = False
+        kill_latched = bool((self.journal.get_state("kill_latch") or {}).get("latched", False))
+        self.frozen = self.frozen or kill_latched
+        self.enabled = not self.frozen
         self.persist()
 
     async def _filled(self, origin_id: str) -> tuple[Decimal, Decimal, Decimal]:
@@ -261,6 +281,40 @@ class LiveExecutionEngine(BaseExecutionEngine):
         notional = sum((Decimal(item["major"]) * Decimal(item["price"]) for item in trades), Decimal("0"))
         fees = sum((Decimal(item.get("fees_amount", "0")) for item in trades), Decimal("0"))
         return quantity, (notional / quantity if quantity else Decimal("0")), fees
+
+    def _round_trigger(self, price: Decimal, direction: int) -> Decimal:
+        if self.position is None:
+            raise RuntimeError("cannot round a trigger without a position")
+        tick = self.rules[self.position.book].tick_size
+        rounding = ROUND_CEILING if direction == 1 else ROUND_FLOOR
+        return (price / tick).to_integral_value(rounding=rounding) * tick
+
+    async def _place_protective_stop(self, entry_order_id: str) -> None:
+        if not self.position:
+            return
+        stop_origin = uuid.uuid4().hex
+        payload = {
+            "book": self.position.book,
+            "side": "sell" if self.position.direction == 1 else "buy",
+            "type": "market",
+            "major": str(self.position.quantity),
+            "stop": str(self.position.stop_price),
+            "origin_id": stop_origin,
+        }
+        if self.position.direction == -1:
+            payload["margin_order_type"] = "CROSS_MARGIN"
+        stop_order = await self.rest.place_order(payload)
+        stop_id = stop_order.get("oid", stop_origin)
+        self.position.stop_origin_id = stop_origin
+        self.bracket = Bracket(
+            self.position.book,
+            entry_order_id,
+            stop_id,
+            self.position.take_profit_price,
+            self.position.stop_price,
+            self.position.quantity,
+        )
+        self.open_order_ids.add(stop_id)
 
     async def execute(self, intent: TradeIntent, atr: Decimal, reference_price: Decimal) -> Any:
         async with self._order_lock:
@@ -284,30 +338,38 @@ class LiveExecutionEngine(BaseExecutionEngine):
             order = await self.rest.place_order(payload)
             entry_order_id = order.get("oid", origin)
             filled, entry_price, _ = await self._filled(origin)
+            entry_cancelled = str(order.get("status", "")).lower() in {"open", "partially_filled", "partial-fill"}
+            if entry_cancelled:
+                await self.rest.cancel_order(entry_order_id)
+                filled, entry_price, _ = await self._filled(origin)
             if filled <= 0:
-                self.open_order_ids.add(entry_order_id)
+                if not entry_cancelled:
+                    self.open_order_ids.add(entry_order_id)
                 self.persist()
                 return order
-            stop_price = entry_price - intent.direction * stop_distance
-            take_profit = entry_price + intent.direction * stop_distance * intent.tp_sl_ratio
-            stop_origin = uuid.uuid4().hex
-            stop_side = "sell" if intent.direction == 1 else "buy"
-            stop_payload = {
-                "book": intent.book,
-                "side": stop_side,
-                "type": "market",
-                "major": str(filled),
-                "stop": str(stop_price),
-                "origin_id": stop_origin,
-            }
-            if intent.direction == -1:
-                stop_payload["margin_order_type"] = "CROSS_MARGIN"
-            stop_order = await self.rest.place_order(stop_payload)
-            stop_id = stop_order.get("oid", stop_origin)
-            self.position = TrackedPosition(intent.book, intent.direction, filled, entry_price, stop_price, take_profit, origin, stop_origin)
-            self.bracket = Bracket(intent.book, entry_order_id, stop_id, take_profit, stop_price, filled)
-            self.open_order_ids.add(stop_id)
-            self.journal.append("live_entry", {"book": intent.book, "quantity": filled, "entry_order_id": entry_order_id, "stop_order_id": stop_id})
+            self.position = TrackedPosition(
+                intent.book,
+                intent.direction,
+                filled,
+                entry_price,
+                Decimal("0"),
+                Decimal("0"),
+                origin,
+            )
+            self.position.stop_price = self._round_trigger(entry_price - intent.direction * stop_distance, intent.direction)
+            self.position.take_profit_price = self._round_trigger(
+                entry_price + intent.direction * stop_distance * intent.tp_sl_ratio,
+                intent.direction,
+            )
+            self.persist()
+            try:
+                await self._place_protective_stop(entry_order_id)
+            except Exception:
+                self.frozen = True
+                self.journal.append("protective_stop_failed", {"book": intent.book})
+                self.persist()
+                raise
+            self.journal.append("live_entry", {"book": intent.book, "quantity": filled, "entry_order_id": entry_order_id, "stop_order_id": self.bracket.stop_order_id})
             self.persist()
             return order
 
@@ -323,6 +385,7 @@ class LiveExecutionEngine(BaseExecutionEngine):
     async def _exit_position(self, reason: str) -> Any:
         if not self.position:
             return None
+        entry_order_id = self.bracket.entry_order_id if self.bracket else self.position.entry_origin_id
         stop_filled = await self._cancel_stop_and_reconcile()
         self.position.quantity -= stop_filled
         if self.position.quantity <= 0:
@@ -346,6 +409,14 @@ class LiveExecutionEngine(BaseExecutionEngine):
         self.journal.append("live_exit", {"book": self.position.book, "filled": filled, "reason": reason})
         if self.position.quantity <= 0:
             self.position = self.bracket = None
+        else:
+            try:
+                await self._place_protective_stop(entry_order_id)
+            except Exception:
+                self.frozen = True
+                self.journal.append("protective_stop_failed", {"book": self.position.book})
+                self.persist()
+                raise
         self.persist()
         return order
 

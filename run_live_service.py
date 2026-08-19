@@ -80,7 +80,7 @@ async def serve(args: argparse.Namespace) -> None:
         controller = DashboardController({engine.mode: engine}, mode=engine.mode, backtest_runner=backtests.run)
         candles: dict[str, dict[str, Any]] = {}
 
-        def publish_book(book) -> None:
+        async def publish_book(book) -> None:
             bids, asks = book.levels("bids"), book.levels("asks")
             if not bids or not asks:
                 return
@@ -93,6 +93,12 @@ async def serve(args: argparse.Namespace) -> None:
             else:
                 candle.update(high=max(candle["high"], price), low=min(candle["low"], price), close=price)
             controller.hub.publish("candle", candle)
+            if engine.position and engine.position.book == book.book:
+                executable = bids[0][0] if engine.position.direction == 1 else asks[0][0]
+                if isinstance(engine, PaperExecutionEngine):
+                    await engine.trigger_bracket(executable)
+                else:
+                    await engine.trigger_take_profit(executable)
 
         async def publish_state() -> None:
             after_id, peak, last_bracket = journal.last_event_id(), Decimal("0"), None
