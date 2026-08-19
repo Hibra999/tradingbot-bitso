@@ -29,7 +29,7 @@ def required_secret(name: str) -> str:
 
 @dataclass(frozen=True)
 class BitsoConfig:
-    rest_url: str = "https://api.bitso.com/v3"
+    rest_url: str = "https://api.bitso.com/api/v3"
     websocket_url: str = "wss://ws.bitso.com"
     books: tuple[str, ...] = ("btc_usd", "eth_usd")
     public_requests_per_minute: int = 60
