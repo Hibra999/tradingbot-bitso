@@ -1,8 +1,27 @@
-# Secrets — nunca subir a git
+# Secrets
 .env
+.env.*
+!.env.example
 
-# Cache de datos descargada desde Alpaca
-data/alpaca_*.csv
+# Generated research/execution artifacts
+/data/**/*.csv
+/data/**/*.parquet
+/data/**/*.sqlite*
+/models/
+/outputs/*
+!/outputs/.gitkeep
+/reports/
+/notebooks/
 
-# Python
+# Python/tool caches
 __pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
