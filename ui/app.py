@@ -86,6 +86,9 @@ class DashboardController:
     def state(self) -> dict[str, Any]:
         position = self.engine.position.payload() if self.engine.position else None
         killed = bool((self.engine.journal.get_state("kill_latch") or {}).get("latched", False))
+        balances = self.engine.journal.get_state("balances") or {}
+        if not balances and hasattr(self.engine, "equity"):
+            balances = {"usd": {"available": str(self.engine.equity), "locked": "0"}}
         return safe_payload(
             {
                 "mode": self.mode,
@@ -93,6 +96,7 @@ class DashboardController:
                 "flat": self.engine.is_flat,
                 "reconciled": not self.engine.open_order_ids,
                 "position": position,
+                "balances": balances,
                 "parameters": asdict(self.engine.risk.params),
             }
         )

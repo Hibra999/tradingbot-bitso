@@ -239,6 +239,13 @@ class LiveExecutionEngine(BaseExecutionEngine):
         currencies = {item["currency"] for item in balances.get("balances", [])}
         if not {part for book in books for part in book.split("_")} <= currencies:
             raise RuntimeError("required balances are missing")
+        self.journal.set_state(
+            "balances",
+            {
+                item["currency"]: {"available": item.get("available", "0"), "locked": item.get("locked", "0")}
+                for item in balances.get("balances", [])
+            },
+        )
         unknown_orders = [item for item in open_orders if item.get("oid") not in self.open_order_ids]
         if unknown_orders:
             raise RuntimeError("unmanaged existing orders must be reconciled before startup")

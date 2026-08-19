@@ -85,6 +85,11 @@ class ExecutionJournal:
             for row in rows
         ]
 
+    def last_event_id(self) -> int:
+        with self._lock:
+            row = self._db.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()
+        return int(row[0])
+
     def close(self) -> None:
         with self._lock:
             self._db.close()

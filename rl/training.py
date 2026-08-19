@@ -221,9 +221,12 @@ class TrainingEngine:
 
             seed_sharpes = [sharpe_ratio(values) for values in returns_by_seed.values()]
             combined = np.concatenate([np.asarray(values) for values in returns_by_seed.values()])
+            trial_sharpes = seed_sharpes
+            if len(seeds) == 1:
+                trial_sharpes = [float(run["test_sharpe"]) for run in runs]
             metrics = institutional_metrics(
                 combined,
-                trial_sharpes=seed_sharpes,
+                trial_sharpes=trial_sharpes,
                 bootstrap_repetitions=2_000 if self.config.profile == "full" else 100,
             )
             seed_evaluation = SeedHarness(seeds, smoke=self.config.profile == "smoke").run(

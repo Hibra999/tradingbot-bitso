@@ -1,108 +1,83 @@
-# GLD (US ETF) M1 → RL-ready feature + bracket-trading pipeline
+# tradingbot-bitso
 
-> **Data source: Alpaca** — the pipeline now downloads OHLCV from
-> [Alpaca Markets](https://alpaca.markets) instead of expecting a local
-> MT4/MT5 CSV. Alpaca does not offer XAUUSD, so the default symbol is **GLD**
-> (the gold ETF, the closest US-market substitute). Stocks/ETFs and crypto
-> (e.g. `BTC/USD`) are supported.
+A causal, CPCV-validated reinforcement-learning research and Bitso execution platform for `BTC/USD` and `ETH/USD`. Research data comes only from Alpaca; deployment market data and orders come only from matching Bitso `btc_usd` and `eth_usd` books.
 
-This project gives you a complete research pipeline:
+The system defaults to a non-promotable smoke profile and paper execution. It does not promise profitability: failed statistical or risk gates produce reports and block live loading.
 
-1. Load and validate raw M1 data.
-2. Parse broker/EET time safely.
-3. Resample M1 execution data into M5/M15 decision bars.
-4. Build causal stationary features normalized by ATR/price.
-5. Visualize candles, indicators, volatility, sessions, feature correlations, trades, equity, and drawdown.
-6. Tune a simple trend-following baseline on train/validation splits while keeping the test split sealed.
-7. Optionally train PPO with a `MultiDiscrete([direction, SL bucket, TP/R bucket])` action space.
-8. Validate with **walk-forward** cross-validation (rolling out-of-sample windows) rather than a single train/val split.
-9. Reveal the test split only once via `final_holdout_eval.py` after the model is frozen.
+## Install
 
-## Quick start
+Python 3.11 is required. Every direct and transitive dependency is pinned.
 
 ```bash
-pip install -r requirements.txt
+python3.11 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+cp .env.example .env
 ```
 
-1. Create an Alpaca account (free), then in **Paper Trading → API Keys** grab
-   your key pair.
-2. Open `.env` (copy from `.env.example` if it does not exist) and paste your
-   keys:
+Put secrets only in `.env` or the process environment. Data, model artifacts, SQLite journals, reports, notebooks, and caches are ignored by Git.
 
-   ```text
-   ALPACA_API_KEY=PKxxxxxxxxxxxxxxxx
-   ALPACA_SECRET_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-   ```
+## Research
 
-   The `.env` file is git-ignored; never commit it.
-
-3. Configure the symbol/range in `config.py` (defaults: `GLD`, M1 execution /
-   H1 decision, from 2020-01-01 to today; the first download is cached under
-   `data/alpaca_GLD_1min.csv`).
-
-Then run:
+The safe default is a short, non-promotable verification run:
 
 ```bash
-python run_pipeline.py
+.venv/bin/python run_quant_pipeline.py
+.venv/bin/python run_quant_pipeline.py --profile smoke --symbol BTC/USD
 ```
 
-This keeps the test split sealed and writes validation-only artifacts, including
-a `walk_forward_baseline.csv` showing baseline stability across the rolling folds.
-
-Train the RL agent with walk-forward validation (one model per fold, aggregate
-out-of-sample report; the final fold is saved as the production model):
+The full profile downloads the complete Alpaca M1 history, fits each feature pipeline inside every CPCV fold, trains RecurrentPPO, SAC, and CVaR QR-DQN independently for each symbol over 10 explicit seeds, and runs 5,000 moving-block Monte Carlo paths:
 
 ```bash
-python train_ppo.py            # == train_ppo.train_walk_forward()
+.venv/bin/python run_quant_pipeline.py --profile full
 ```
 
-When you are ready for the one-time holdout reveal, run:
+Full training belongs on the external high-resource machine. This VPS is intended for compile checks and the bounded safety suite.
 
-```bash
-python final_holdout_eval.py
-```
+Research outputs include per-symbol manifests and PNG reports with observed/Monte Carlo equity, underwater drawdown, monthly returns, and return distributions. A smoke manifest can never pass promotion.
 
-Or open:
+## Approval and live safety
+
+Full runs may mark artifacts eligible but never select one. An operator must set `selected_artifact` to one path already listed in `eligible_artifacts`, then set:
 
 ```text
-notebooks/XAUUSD_RL_Pipeline_Demo.ipynb
+MODEL_APPROVED=true
+APPROVED_MODEL_MANIFEST=/absolute/path/to/full_manifest.json
 ```
 
-## Important defaults
+Live execution additionally requires:
 
-- `data_source = "alpaca"` in `config.py`: OHLCV comes from Alpaca (symbol `GLD`,
-  cached in `data/`); set it to `"csv"` to go back to reading an MT4/MT5 file.
-- Alpaca bar timestamps are bar-*open*; they are shifted to bar-*close* before
-  resampling/backtesting (same convention the MT4 loader used).
-- The data index is UTC (Alpaca timezone), whereas the old CSV path used
-  Europe/Helsinki. `SOURCE_TZ` still applies to the CSV fallback only.
-- Annualisation (`periods_per_year`) automatically switches to US-stock bars
-  per year (6.5 h/day, 252 days) when `data_source = "alpaca"`.
-- `spread_price`/`slippage_price` defaults were tuned for XAUUSD price levels;
-  for GLD (~$200–$300) you may want to shrink them in `config.py`.
-- `DECISION_TIMEFRAME = H1`, while M1 is retained for intrabar TP/SL simulation.
-- Features are causal and mostly stationary: ATR-normalized distances, ratios, session flags, candle shape ratios.
-- The observation set is **25 features**. Four redundant ones were dropped in the 2026-06-02 collinearity audit (`rsi_centered`, `roc5_atr`, `body_atr`, `ema50_slope5_atr`); each was |r| ≥ 0.96 with a retained feature (two were exact duplicates). The underlying `ema20/50/200` columns are still computed for the baselines and charts.
-- **Sliding-window walk-forward** (`train_ppo.train_sliding_walk_forward`, the default `python train_ppo.py` entry point) is the realistic validator: each fold trains on `sliding_train_years` (5y), selects its checkpoint on the next `sliding_val_months` (6m), and is judged out-of-sample on the following `sliding_test_months` (6m); the window then slides `sliding_step_months` (6m) and repeats. This simulates *retraining every 6 months and trading the next 6 months live*. Every fold's test window is stitched into one continuous out-of-sample equity curve (`models/sliding_oos_equity.csv`); the gate runs on the **test** metrics. Because every train window is the same length, equal timesteps per fold = equal passes. ~35 folds over the 23y dataset (raise `sliding_step_months` to reduce).
-- **Block walk-forward** (`train_ppo.train_walk_forward`; `config.py`: `n_walk_forward_folds`, `walk_forward_anchored`, `test_frac`) is the alternative: it seals the last `test_frac` of bars and rolls `n_folds` train→val windows over the rest. `test_frac == 1 - train_frac - val_frac`, so the sealed holdout matches the single-split test exactly.
-- When TP and SL are both inside the same M1 candle, the simulator assumes SL first. This is deliberately pessimistic.
-- Position size is fixed-fractional risk-based; the RL agent controls direction and bracket shape, not size.
-- `run_pipeline.py` now performs a temporal train/validation/test split, tunes on train/val, and keeps test sealed by default.
-- `training_diagnostics.py` and `train_ppo.py` also keep the test split sealed by default.
-- RL rewards are normalized by risk budget rather than raw cash PnL, which is materially more stable for PPO.
+```text
+TRADING_MODE=live
+BITSO_LIVE_ENABLED=true
+BITSO_API_KEY=...
+BITSO_API_SECRET=...
+```
 
-## Files
+Shorts remain disabled unless `BITSO_MARGIN_SHORTS_ENABLED=true`, `BITSO_MARGIN_ACCOUNT_CONFIRMED=true`, and book margin capability passes preflight. Spot brackets keep the stop at Bitso and the take-profit synthetic to avoid double-locking assets. Kill is latched across restarts and never auto-resumes.
 
-- `config.py`: all main parameters (data source, symbol, timeframes, validation, PPO).
-- `alpaca_data.py`: Alpaca Markets downloader with pagination + local CSV cache.
-- `data_loader.py`: data-source dispatch (`load_ohlcv`), CSV parsing, timezone handling, validation, resampling.
-- `features.py`: causal indicators and stationary feature matrix.
-- `leakage_checks.py`: simple future-append stability test.
-- `env_bracket.py`: Gymnasium-compatible bracket trading environment.
-- `baselines.py`: random and EMA/ATR rule policies.
-- `evaluate.py`: metrics, trade-log summary, drawdown.
-- `visualize.py`: Plotly visualization functions.
-- `train_ppo.py`: optional PPO training scaffold.
-- `run_pipeline.py`: one-command pre-test pipeline with validation-only outputs. Prints CUDA/GPU status, shows a progress bar for every step, and writes a single combined HTML report at `outputs/00_combined_report.html` alongside the per-chart files.
-- `final_holdout_eval.py`: explicit one-time holdout evaluation entry point.
-- `notebooks/XAUUSD_RL_Pipeline_Demo.ipynb`: guided notebook.
+## Service
+
+Set a random `DASHBOARD_TOKEN` of at least 16 characters, then run:
+
+```bash
+.venv/bin/python run_live_service.py
+```
+
+The service coordinates the Bitso L2 stream, paper/live engine, FastAPI dashboard, SQLite journal, and optional Telegram bot in one asyncio loop. It binds to `127.0.0.1:8000` by default. Remote binding must be explicit and all REST calls still require `Authorization: Bearer <DASHBOARD_TOKEN>`; the WebSocket authenticates in its first message.
+
+For Telegram, set `TELEGRAM_BOT_TOKEN` and a comma-separated `TELEGRAM_ALLOWED_CHAT_IDS`. Authorized chats receive `/status`, `/balance`, `/backtest`, `/params`, `/set_risk`, and immediate `/kill`; unauthorized chats are ignored.
+
+## Safety invariants
+
+- Features, scaling, wavelets, and HMM probabilities are causal and fitted only on training data.
+- Decision H1 bars fill no earlier than the following M1 tick; ambiguous SL/TP bars resolve SL first.
+- CPCV purges holding-interval overlap, applies embargo, and resets every disjoint episode flat.
+- Paper and live engines share `TradeIntent`, Decimal risk checks, durable state, bracket logic, and kill path.
+- Live loading requires full-profile gates, an eligible operator-selected artifact, approval flags, balance/book/fee/order reconciliation, and a flat engine.
+- Kill reports local dispatch, exchange acknowledgement, and confirmed-flat latency separately.
+
+Run the deterministic suite with:
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+```
