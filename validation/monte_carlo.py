@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 
 @dataclass(frozen=True)
@@ -65,7 +66,8 @@ def moving_block_monte_carlo(
         path_matrix = np.memmap(f"{folder}/equity.dat", mode="w+", dtype="float32", shape=(paths, horizon))
         block_count = int(np.ceil(horizon / block_size))
         offsets = np.arange(block_size)
-        for start in range(0, paths, batch_size):
+        total_batches = (paths + batch_size - 1) // batch_size
+        for start in tqdm(range(0, paths, batch_size), total=total_batches, desc="Monte Carlo paths", unit="batch", leave=False):
             stop = min(start + batch_size, paths)
             count = stop - start
             block_starts = rng.integers(0, len(values) - block_size + 1, size=(count, block_count))
@@ -86,7 +88,8 @@ def moving_block_monte_carlo(
         path_matrix.flush()
 
         cone = np.empty((len(quantiles), horizon), dtype=float)
-        for column_start in range(0, horizon, 256):
+        total_col_batches = (horizon + 255) // 256
+        for column_start in tqdm(range(0, horizon, 256), total=total_col_batches, desc="Equity cone", unit="col_batch", leave=False):
             column_stop = min(column_start + 256, horizon)
             cone[:, column_start:column_stop] = np.quantile(
                 np.asarray(path_matrix[:, column_start:column_stop]), quantiles, axis=0

@@ -44,6 +44,49 @@ class RLConfig:
     sl_atr_multipliers: tuple[float, ...] = (1.0, 1.5, 2.5, 3.5)
     tp_sl_ratios: tuple[float, ...] = (1.0, 1.5, 2.0, 4.0)
     max_holding_bars: int = 24
+    timesteps: dict[str, int] = field(default_factory=lambda: {
+        "recurrent_ppo": 100_000,
+        "sac": 100_000,
+        "cvar_qrdqn": 100_000,
+    })
+    evaluations: int = 10
+
+    @classmethod
+    def from_env(cls) -> "RLConfig":
+        """Build RLConfig reading per-algorithm toggles and timesteps from env.
+
+        Env vars (all optional, defaults shown):
+            RL_RECURRENT_PPO_ENABLED=true
+            RL_RECURRENT_PPO_TIMESTEPS=100000
+            RL_SAC_ENABLED=true
+            RL_SAC_TIMESTEPS=100000
+            RL_CVAR_QRDQN_ENABLED=true
+            RL_CVAR_QRDQN_TIMESTEPS=100000
+            RL_EVALUATIONS=10
+        """
+        all_algos = ("recurrent_ppo", "sac", "cvar_qrdqn")
+        env_prefix = {
+            "recurrent_ppo": "RL_RECURRENT_PPO",
+            "sac": "RL_SAC",
+            "cvar_qrdqn": "RL_CVAR_QRDQN",
+        }
+
+        enabled: list[str] = []
+        ts: dict[str, int] = {}
+        for algo in all_algos:
+            prefix = env_prefix[algo]
+            is_on = os.getenv(f"{prefix}_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+            if is_on:
+                enabled.append(algo)
+            ts[algo] = int(os.getenv(f"{prefix}_TIMESTEPS", "100000"))
+
+        evaluations = int(os.getenv("RL_EVALUATIONS", "10"))
+
+        return cls(
+            algorithms=tuple(enabled),
+            timesteps=ts,
+            evaluations=evaluations,
+        )
 
 
 @dataclass(frozen=True)

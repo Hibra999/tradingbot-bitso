@@ -111,6 +111,7 @@ def load_alpaca_ohlcv(
     cache_dir: Optional[Union[str, Path]] = "data/cache",
     timestamp_is_bar_open: Optional[bool] = None,
     feed: str = "iex",
+    cache_only: bool = False,
 ) -> pd.DataFrame:
     """Download OHLCV bars from Alpaca Markets and return a standardized,
     timezone-aware (UTC) DataFrame indexed by bar CLOSE time with columns
@@ -139,6 +140,9 @@ timestamp_is_bar_open : optional bool
     feed : str
         Stock data feed: "iex" (free plan, 15-min delayed) or "sip" (paid,
         real-time consolidated tape). Ignored for crypto.
+    cache_only : bool
+        If True, return only cached data without making any API calls.
+        Raises RuntimeError if no cache file exists for this symbol/timeframe.
 
     Returns
     -------
@@ -178,15 +182,26 @@ timestamp_is_bar_open : optional bool
         cache_path = Path(cache_dir) / f"alpaca_{symbol.replace('/', '_')}_{pandas_rule}.parquet"
         if cache_path.exists():
             cached = _read_cached_parquet(cache_path)
-        if cached is not None and len(cached) and cached.index.min() <= start:
-            end_tolerance = pd.Timedelta(days=7) if pandas_rule == "1D" else pd.Timedelta(days=1)
-            if cached.index.max() >= end - end_tolerance:
-                print(f"Alpaca: cache hit -> {cache_path.name} ({len(cached):,} bars)")
-                return _slice_range(cached, start, min(end, cached.index.max()), max_days_for_demo)
-            print(f"Alpaca: cache covers {cached.index.min()} -> {cached.index.max()}; refreshing the tail only")
-            fetch_start = cached.index.max() - bar_delta  # re-fetch the boundary bar for a clean merge
-        else:
-            cached = None
+
+    # -- cache_only mode: return whatever is cached, no API calls --------
+    if cache_only:
+        if cached is not None and len(cached):
+            print(f"Alpaca: cache-only -> {cache_path.name if cache_path else 'memory'} ({len(cached):,} bars)")
+            return _slice_range(cached, start, min(end, cached.index.max()), max_days_for_demo)
+        raise RuntimeError(
+            f"Cache-only mode but no cached data found for {symbol} ({pandas_rule}). "
+            f"Run once with CACHE_ONLY=false to download data first."
+        )
+
+    if cached is not None and len(cached):
+        end_tolerance = pd.Timedelta(days=7) if pandas_rule == "1D" else pd.Timedelta(days=1)
+        if cached.index.max() >= end - end_tolerance:
+            print(f"Alpaca: cache hit -> {cache_path.name} ({len(cached):,} bars)")
+            return _slice_range(cached, start, min(end, cached.index.max()), max_days_for_demo)
+        print(f"Alpaca: cache covers {cached.index.min()} -> {cached.index.max()}; refreshing the tail only")
+        fetch_start = cached.index.max() - bar_delta  # re-fetch the boundary bar for a clean merge
+    else:
+        cached = None
 
     api_key, secret_key = _get_credentials()
 
