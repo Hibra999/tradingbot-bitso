@@ -96,6 +96,7 @@ def moving_block_monte_carlo(
             index=pd.RangeIndex(1, horizon + 1, name="step"),
             columns=[f"p{int(q * 100):02d}" for q in quantiles],
         )
+        path_matrix._mmap.close()
 
     return MonteCarloResult(
         equity_cone=equity_cone,

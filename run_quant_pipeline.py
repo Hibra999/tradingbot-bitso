@@ -15,8 +15,8 @@ def arguments() -> argparse.Namespace:
 
 def main() -> int:
     args = arguments()
-    if sys.version_info[:2] != (3, 11):
-        raise RuntimeError("Python 3.11 is required")
+    if sys.version_info[:2] < (3, 11):
+        raise RuntimeError("Python 3.11 or newer is required")
 
     import numpy as np
     from dotenv import load_dotenv
