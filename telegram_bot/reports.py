@@ -369,14 +369,26 @@ def generate_full_report(
     quantstats_benchmark = (
         _quantstats_series(benchmark_values) if benchmark_values is not None else None
     )
-    qs.reports.html(
-        quantstats_values,
-        benchmark=quantstats_benchmark,
-        output=str(destination),
-        title=title,
-        periods_per_year=periods,
-        download_filename=destination.name,
-    )
+    quantstats_error: str | None = None
+    try:
+        qs.reports.html(
+            quantstats_values,
+            benchmark=quantstats_benchmark,
+            output=str(destination),
+            title=title,
+            periods_per_year=periods,
+            download_filename=destination.name,
+        )
+    except np.linalg.LinAlgError:
+        quantstats_error = "QuantStats plots unavailable: return covariance is singular."
+        plt.close("all")
+        destination.write_text(
+            "<!doctype html><html><head><meta charset=\"utf-8\">"
+            f"<title>{html.escape(title)}</title></head><body>"
+            f"<section class=\"local-report\"><h1>{html.escape(title)}</h1>"
+            f"<p>{html.escape(quantstats_error)}</p></section></body></html>",
+            encoding="utf-8",
+        )
     encoded = base64.b64encode(graphics.read_bytes()).decode("ascii")
     extra = (
         "<style>.local-report{max-width:960px;margin:36px auto}.local-report table{width:100%;border-collapse:collapse}"
@@ -400,4 +412,5 @@ def generate_full_report(
         "metrics": metrics,
         "benchmark_metrics": benchmark_metrics,
         "comparator_metrics": comparator_metrics,
+        "quantstats_error": quantstats_error,
     }

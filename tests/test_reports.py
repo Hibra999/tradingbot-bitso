@@ -15,6 +15,36 @@ from validation import moving_block_monte_carlo
 
 
 class ReportTests(unittest.TestCase):
+    def test_singular_quantstats_kde_falls_back_to_local_html(self) -> None:
+        index = pd.date_range("2025-01-01", periods=24, freq="h", tz="UTC")
+        returns = pd.Series(np.zeros(len(index)), index=index)
+        monte_carlo = moving_block_monte_carlo(
+            returns.to_numpy(), paths=20, block_size=4, batch_size=5, seed=3
+        )
+
+        def quantstats_html(*args, **kwargs) -> None:
+            raise np.linalg.LinAlgError("singular covariance")
+
+        quantstats = SimpleNamespace(reports=SimpleNamespace(html=quantstats_html))
+        with tempfile.TemporaryDirectory() as folder, patch.dict(
+            sys.modules, {"quantstats": quantstats}
+        ):
+            report = generate_full_report(
+                returns,
+                monte_carlo,
+                Path(folder) / "smoke.html",
+                title="Smoke",
+            )
+
+            self.assertIn(
+                "return covariance is singular",
+                report["html"].read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                report["quantstats_error"],
+                "QuantStats plots unavailable: return covariance is singular.",
+            )
+
     def test_quantstats_report_compares_model_with_buy_and_hold(self) -> None:
         index = pd.date_range("2025-01-01", periods=48, freq="h", tz="UTC")
         strategy = pd.Series(np.tile([0.002, -0.001], 24), index=index)
