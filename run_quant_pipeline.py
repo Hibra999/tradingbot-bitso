@@ -46,7 +46,7 @@ def main() -> int:
     else:
         cache_only = os.getenv("CACHE_ONLY", "false").strip().lower() in ("1", "true", "yes", "on")
 
-    validation = ValidationConfig()
+    validation = ValidationConfig.from_env()
     if args.profile == "smoke":
         validation = replace(validation, temporal_groups=3, test_groups=1, embargo_bars=24, monte_carlo_paths=100)
     

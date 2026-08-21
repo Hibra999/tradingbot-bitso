@@ -99,6 +99,47 @@ class ValidationConfig:
     smoke_seeds: tuple[int, ...] = (0,)
     monte_carlo_paths: int = 5_000
 
+    @classmethod
+    def from_env(cls) -> "ValidationConfig":
+        temporal_groups = int(os.getenv("VALIDATION_TEMPORAL_GROUPS", "6"))
+        test_groups = int(os.getenv("VALIDATION_TEST_GROUPS", "2"))
+        embargo_bars = int(os.getenv("VALIDATION_EMBARGO_BARS", "200"))
+        max_holding_bars = int(os.getenv("VALIDATION_MAX_HOLDING_BARS", "24"))
+
+        full_seeds_val = os.getenv("VALIDATION_FULL_SEEDS")
+        if full_seeds_val is not None and full_seeds_val.strip():
+            raw = full_seeds_val.strip()
+            if "," in raw:
+                full_seeds = tuple(int(x.strip()) for x in raw.split(",") if x.strip())
+            else:
+                count = int(raw)
+                full_seeds = tuple(range(count))
+        else:
+            full_seeds = tuple(range(10))
+
+        smoke_seeds_val = os.getenv("VALIDATION_SMOKE_SEEDS")
+        if smoke_seeds_val is not None and smoke_seeds_val.strip():
+            raw = smoke_seeds_val.strip()
+            if "," in raw:
+                smoke_seeds = tuple(int(x.strip()) for x in raw.split(",") if x.strip())
+            else:
+                count = int(raw)
+                smoke_seeds = tuple(range(count))
+        else:
+            smoke_seeds = (0,)
+
+        monte_carlo_paths = int(os.getenv("VALIDATION_MONTE_CARLO_PATHS", "5000"))
+
+        return cls(
+            temporal_groups=temporal_groups,
+            test_groups=test_groups,
+            embargo_bars=embargo_bars,
+            max_holding_bars=max_holding_bars,
+            full_seeds=full_seeds,
+            smoke_seeds=smoke_seeds,
+            monte_carlo_paths=monte_carlo_paths,
+        )
+
 
 @dataclass(frozen=True)
 class RuntimeRiskParams:
@@ -168,4 +209,6 @@ class AppConfig:
             profile=profile,
             paper_mode=not live,
             allow_margin_shorts=env_flag("BITSO_MARGIN_SHORTS_ENABLED"),
+            rl=RLConfig.from_env(),
+            validation=ValidationConfig.from_env(),
         )

@@ -65,6 +65,35 @@ class QuantPipelineTests(unittest.TestCase):
             restored = CausalFeaturePipeline.load(path)
             pd.testing.assert_frame_equal(past, restored.transform(first, history_context=training))
 
+    def test_segmented_and_gapped_pipeline_fit(self) -> None:
+        bars = _bars(800)
+        seg1, seg2 = bars.iloc[:350], bars.iloc[450:]
+        pipeline_seg = CausalFeaturePipeline(fracdiff_threshold=1e-3, random_state=5).fit((seg1, seg2))
+        self.assertTrue(len(pipeline_seg.feature_order) > 0)
+        self.assertEqual(len(pipeline_seg.dataset_range), 2)
+
+        gapped = pd.concat([seg1, seg2])
+        pipeline_gap = CausalFeaturePipeline(fracdiff_threshold=1e-3, random_state=5).fit(gapped)
+        self.assertEqual(pipeline_seg.feature_order, pipeline_gap.feature_order)
+
+    def test_hmm_forward_probabilities_outlier_resilience(self) -> None:
+        bars = _bars(400)
+        features = pd.DataFrame(
+            {
+                "return": np.log(bars["Close"]).diff(),
+                "trend": np.log(bars["Close"] / bars["Close"].ewm(span=20, adjust=False).mean()),
+                "volatility": np.log(bars["High"] / bars["Low"]),
+            }
+        )
+        model = CausalRegimeModel(random_state=3).fit(features.iloc[:200], "trend")
+        corrupted = features.copy()
+        corrupted.iloc[250, 0] = 50.0  # 5000% return outlier
+        corrupted.iloc[250, 1] = 50.0
+        probs = model.forward_probabilities(corrupted)
+        self.assertFalse(probs.iloc[251:].isnull().all().any())
+        valid = probs.dropna()
+        np.testing.assert_allclose(valid.sum(axis=1), 1.0, atol=1e-6)
+
 
 if __name__ == "__main__":
     unittest.main()

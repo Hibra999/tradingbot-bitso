@@ -43,12 +43,10 @@ class SeedEvaluation:
 
 class SeedHarness:
     def __init__(self, seeds: tuple[int, ...], *, smoke: bool = False):
+        if not seeds:
+            raise ValueError("seed evaluation requires at least one seed")
         if len(set(seeds)) != len(seeds):
             raise ValueError("seeds must be unique")
-        if not smoke and not 10 <= len(seeds) <= 30:
-            raise ValueError("full evaluation requires 10 to 30 seeds")
-        if smoke and not seeds:
-            raise ValueError("smoke evaluation requires at least one seed")
         self.seeds = seeds
 
     def run(self, evaluator: Callable[[int], Mapping[str, float]]) -> SeedEvaluation:

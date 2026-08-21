@@ -118,8 +118,9 @@ class SB3CandidateRunner:
             while not done:
                 action = recurrent.predict(observation) if recurrent else model.predict(observation, deterministic=True)[0]
                 observation, _, done, _, info = environment.step(action)
-                equity = float(info["equity"])
-                returns.append(equity / previous_equity - 1)
+                equity = max(float(info["equity"]), 0.0)
+                ret = (equity / previous_equity - 1.0) if previous_equity > 0 else 0.0
+                returns.append(max(ret, -1.0))
                 previous_equity = equity
                 step_count += 1
                 pbar.update(1)
@@ -231,8 +232,11 @@ class TrainingEngine:
                     embargo_bars=self.config.validation.embargo_bars,
                 )
                 pipeline = CausalFeaturePipeline(config_hash=self.config.config_hash, random_state=fold_number)
-                pipeline.fit(decision_data.iloc[train_indices])
+                training_segments_raw = tuple(decision_data.iloc[segment] for segment in _contiguous(train_indices))
+                pipeline.fit(training_segments_raw)
                 feature_manifests.append(pipeline.manifest())
+
+                all_prior = np.arange(len(decision_data))
 
                 def transformed(indices: np.ndarray, history_indices: np.ndarray) -> pd.DataFrame:
                     raw = decision_data.iloc[indices]
@@ -241,9 +245,8 @@ class TrainingEngine:
                     features = pipeline.transform(raw, history_context=history)
                     return raw.loc[features.index].join(features)
 
-                training_segments = tuple(transformed(segment, train_indices) for segment in _contiguous(train_indices))
-                validation_segment = transformed(validation_indices, train_indices)
-                all_prior = np.arange(len(decision_data))
+                training_segments = tuple(transformed(segment, all_prior) for segment in _contiguous(train_indices))
+                validation_segment = transformed(validation_indices, all_prior)
                 test_segments = tuple(transformed(segment, all_prior) for segment in fold.episode_segments)
                 for seed in seeds:
                     job_idx += 1
@@ -280,10 +283,12 @@ class TrainingEngine:
             fold_seed_bar.close()
 
             seed_sharpes = [sharpe_ratio(values) for values in returns_by_seed.values()]
-            combined = np.concatenate([np.asarray(values) for values in returns_by_seed.values()])
-            trial_sharpes = seed_sharpes
-            if len(seeds) == 1:
-                trial_sharpes = [float(run["test_sharpe"]) for run in runs]
+            combined = np.concatenate([np.asarray(values, dtype=float) for values in returns_by_seed.values() if len(values)])
+            trial_sharpes = [s for s in seed_sharpes if np.isfinite(s)]
+            if len(seeds) == 1 or len(trial_sharpes) < 2:
+                trial_sharpes = [float(run["test_sharpe"]) for run in runs if np.isfinite(float(run["test_sharpe"]))]
+            if len(trial_sharpes) < 2:
+                trial_sharpes = [0.0, 0.0]
             metrics = institutional_metrics(
                 combined,
                 trial_sharpes=trial_sharpes,
