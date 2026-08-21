@@ -29,6 +29,7 @@ class BracketTradingEnvV2(gym.Env):
         randomize: bool = True,
         base_spread: float = 0.0,
         random_seed: int = 0,
+        allow_short: bool = False,
     ):
         super().__init__()
         self.decision_bars = decision_bars
@@ -39,19 +40,20 @@ class BracketTradingEnvV2(gym.Env):
         self.model_id = model_id
         self.randomize = randomize
         self.base_spread = base_spread
+        self.allow_short = allow_short
         self._random_seed = int(random_seed)
         self.core = BracketExecutionCore(decision_bars, m1_bars)
         cfg = RLConfig()
         self._risk_fraction = cfg.risk_fractions[0]
         self._sl_atr_multipliers, self._tp_sl_ratios = cfg.sl_atr_multipliers, cfg.tp_sl_ratios
-        self._qrdqn_actions = qrdqn_action_table(cfg)
+        self._qrdqn_actions = qrdqn_action_table(cfg, allow_short=allow_short)
         self.action_space = {
-            "ppo": spaces.MultiDiscrete([3, 4, 4]),
+            "ppo": spaces.MultiDiscrete([3 if allow_short else 2, 4, 4]),
             "sac": spaces.Box(
                 low=np.array([-1, 0.005, 1, 1], dtype=np.float32),
                 high=np.array([1, 0.03, 3.5, 4], dtype=np.float32),
             ),
-            "qrdqn": spaces.Discrete(129),
+            "qrdqn": spaces.Discrete(len(self._qrdqn_actions)),
         }[action_mode]
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=(len(feature_columns) + 3,), dtype=np.float32)
 
@@ -88,13 +90,16 @@ class BracketTradingEnvV2(gym.Env):
     def step(self, action):
         if self.action_mode == "ppo":
             direction_index, sl_index, tp_index = (int(value) for value in action)
-            if direction_index not in (0, 1, 2):
-                raise ValueError("PPO direction must be 0=flat, 1=long, or 2=short")
+            allowed = (0, 1, 2) if self.allow_short else (0, 1)
+            if direction_index not in allowed:
+                raise ValueError("PPO direction is unavailable for the configured action space")
             direction, risk = (0, 1, -1)[direction_index], self._risk_fraction
             sl, tp = self._sl_atr_multipliers[sl_index], self._tp_sl_ratios[tp_index]
         elif self.action_mode == "sac":
             direction_score, risk, sl, tp = _sac_action_values(action)
-            direction = 0 if abs(direction_score) < 0.1 else (1 if direction_score > 0 else -1)
+            direction = 0 if direction_score < 0.1 else 1
+            if self.allow_short and direction_score <= -0.1:
+                direction = -1
         else:
             direction, risk, sl, tp = self._qrdqn_actions[int(action)]
         reward, realized_r, equity = self.core.execute_values(
@@ -108,6 +113,6 @@ class BracketTradingEnvV2(gym.Env):
             latency_ticks=int(self.latencies[self.index]),
         )
         self.index += 1
-        terminated = self.index >= len(self.decision_bars) - 1
-        observation = np.zeros(self.observation_space.shape, dtype=np.float32) if terminated else self._observation()
-        return observation, reward, terminated, False, {"equity": equity, "realized_r": realized_r}
+        truncated = self.index >= len(self.decision_bars) - 1
+        observation = np.zeros(self.observation_space.shape, dtype=np.float32) if truncated else self._observation()
+        return observation, reward, False, truncated, {"equity": equity, "realized_r": realized_r}

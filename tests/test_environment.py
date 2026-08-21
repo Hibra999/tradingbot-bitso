@@ -27,9 +27,26 @@ class EnvironmentTests(unittest.TestCase):
 
     def test_action_mappings_are_bounded(self) -> None:
         self.assertEqual(len(qrdqn_action_table()), 129)
+        long_only = qrdqn_action_table(allow_short=False)
+        self.assertEqual(len(long_only), 65)
+        self.assertNotIn(-1, {action[0] for action in long_only})
         timestamp = pd.Timestamp("2025-01-01", tz="UTC").to_pydatetime()
         self.assertEqual(sac_intent([0.09, 0.01, 1.5, 2], model_id="m", book="btc_usd", timestamp=timestamp).direction, 0)
         self.assertEqual(sac_intent([-0.5, 0.01, 1.5, 2], model_id="m", book="btc_usd", timestamp=timestamp).direction, -1)
+
+    def test_open_position_is_liquidated_at_segment_end(self) -> None:
+        decisions = pd.DataFrame(
+            {"Open": [100, 101], "High": [101, 102], "Low": [99, 100], "Close": [100, 101], "atr": [1, 1]},
+            index=pd.date_range("2025-01-01 01:00", periods=2, freq="h", tz="UTC"),
+        )
+        m1_index = pd.date_range("2025-01-01 01:01", periods=60, freq="min", tz="UTC")
+        m1 = pd.DataFrame({"Open": 100.0, "High": 101.0, "Low": 100.0, "Close": 101.0}, index=m1_index)
+        core = BracketExecutionCore(decisions, m1, commission_rate=0, holding_cost_r=0)
+        intent = ppo_intent([1, 0, 3], model_id="m", book="btc_usd", timestamp=decisions.index[0].to_pydatetime())
+        result = core.execute_interval(0, intent)
+        self.assertEqual(core.position.direction, 0)
+        self.assertEqual(core.trades[-1]["reason"], "segment_end")
+        self.assertGreater(result.realized_r, 0)
 
 
 if __name__ == "__main__":

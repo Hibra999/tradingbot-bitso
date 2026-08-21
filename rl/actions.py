@@ -111,25 +111,36 @@ def _qrdqn_action_table(
     risk_fractions: tuple[float, ...],
     sl_atr_multipliers: tuple[float, ...],
     tp_sl_ratios: tuple[float, ...],
+    allow_short: bool,
 ) -> tuple[tuple[int, float, float, float], ...]:
     actions: list[tuple[int, float, float, float]] = [
         (0, risk_fractions[0], sl_atr_multipliers[0], tp_sl_ratios[0])
     ]
     actions.extend(
         (direction, risk, sl, tp)
-        for direction in (-1, 1)
+        for direction in ((-1, 1) if allow_short else (1,))
         for risk in risk_fractions
         for sl in sl_atr_multipliers
         for tp in tp_sl_ratios
     )
-    if len(actions) != 129:
-        raise ValueError("QR-DQN action table must contain exactly 129 actions")
+    expected = 129 if allow_short else 65
+    if len(actions) != expected:
+        raise ValueError(f"QR-DQN action table must contain exactly {expected} actions")
     return tuple(actions)
 
 
-def qrdqn_action_table(config: RLConfig | None = None) -> tuple[tuple[int, float, float, float], ...]:
+def qrdqn_action_table(
+    config: RLConfig | None = None,
+    *,
+    allow_short: bool = True,
+) -> tuple[tuple[int, float, float, float], ...]:
     cfg = config or RLConfig()
-    return _qrdqn_action_table(cfg.risk_fractions, cfg.sl_atr_multipliers, cfg.tp_sl_ratios)
+    return _qrdqn_action_table(
+        cfg.risk_fractions,
+        cfg.sl_atr_multipliers,
+        cfg.tp_sl_ratios,
+        allow_short,
+    )
 
 
 def qrdqn_intent(

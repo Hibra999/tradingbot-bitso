@@ -20,7 +20,7 @@ def main() -> int:
     if sys.version_info[:2] < (3, 11):
         raise RuntimeError("Python 3.11 or newer is required")
 
-    import numpy as np
+    import pandas as pd
     from dotenv import load_dotenv
     from tqdm import tqdm
 
@@ -40,14 +40,27 @@ def main() -> int:
 
     class SmokeRunner:
         def __call__(self, dataset) -> CandidateRun:
-            returns = np.concatenate(
-                [segment["Close"].pct_change().dropna().to_numpy(dtype=float) for segment in dataset.test_segments]
-            )
+            def buy_and_hold(segments):
+                series = [segment["Close"].pct_change().dropna().astype(float) for segment in segments]
+                return pd.concat(series).sort_index()
+
+            evaluation = buy_and_hold(dataset.test_segments)
+            training = buy_and_hold(dataset.training_segments)
             artifact = dataset.output_dir / "smoke-verification.json"
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_text(json.dumps({"profile": "smoke", "promotable": False}), encoding="utf-8")
             validation_return = float(dataset.validation_segment["Close"].pct_change().dropna().sum())
-            return CandidateRun(tuple(returns), str(artifact), validation_return)
+            return CandidateRun(
+                tuple(evaluation.to_numpy()),
+                str(artifact),
+                validation_return,
+                tuple(str(value) for value in evaluation.index),
+                tuple(training.to_numpy()),
+                tuple(str(value) for value in training.index),
+                tuple(evaluation.to_numpy()),
+                tuple(training.to_numpy()),
+                (validation_return,),
+            )
 
     runner = (
         SB3CandidateRunner(config.rl.timesteps, config.rl.evaluations, notifier, config.rl.recurrent_ppo_envs)
@@ -81,29 +94,50 @@ def main() -> int:
                     notifier.notify_phase("Training", symbol, f"{len(decision):,} H1 bars")
                     manifest = TrainingEngine(config, runner=runner, notifier=notifier).run_symbol(symbol, decision, m1)
                     phase_bar.update()
-                    observed_returns = decision["Close"].pct_change().dropna()
+                    reporting = manifest.pop("_reporting")
+                    training_returns = reporting["training"]
+                    evaluation_returns = reporting["evaluation"]
                     phase_bar.set_postfix_str("monte carlo")
-                    notifier.notify_phase("Monte Carlo", symbol, f"{config.validation.monte_carlo_paths:,} paths")
-                    monte_carlo = moving_block_monte_carlo(
-                        observed_returns.to_numpy(),
+                    notifier.notify_phase(
+                        "Monte Carlo",
+                        symbol,
+                        f"train + evaluation | {config.validation.monte_carlo_paths:,} paths each",
+                    )
+                    training_monte_carlo = moving_block_monte_carlo(
+                        training_returns.to_numpy(),
                         paths=config.validation.monte_carlo_paths,
-                        block_size=min(24, len(observed_returns)),
+                        block_size=min(24, len(training_returns)),
+                    )
+                    evaluation_monte_carlo = moving_block_monte_carlo(
+                        evaluation_returns.to_numpy(),
+                        paths=config.validation.monte_carlo_paths,
+                        block_size=min(24, len(evaluation_returns)),
                     )
                     phase_bar.update()
-                    destination = config.outputs_dir / f"{symbol.replace('/', '_')}_report.html"
                     phase_bar.set_postfix_str("reporting")
                     notifier.notify_phase("Reporting", symbol)
-                    report = generate_full_report(
-                        observed_returns,
-                        monte_carlo,
-                        destination,
-                        title=f"{symbol} {args.profile.title()} Backtest",
+                    stem = symbol.replace("/", "_")
+                    training_report = generate_full_report(
+                        training_returns,
+                        training_monte_carlo,
+                        config.outputs_dir / f"{stem}_training_report.html",
+                        title=f"{symbol} {args.profile.title()} Training Backtest",
                         symbol=symbol,
+                        benchmark=reporting["training_benchmark"],
                     )
-                    notifier.notify(report["text_report"])
-                    notifier.send_photo(report["graphics"], f"{symbol} backtest graphics")
-                    notifier.send_document(report["html"], f"{symbol} full QuantStats report")
-                    notifier.send_document(report["latex"], f"{symbol} LaTeX tables")
+                    evaluation_report = generate_full_report(
+                        evaluation_returns,
+                        evaluation_monte_carlo,
+                        config.outputs_dir / f"{stem}_evaluation_report.html",
+                        title=f"{symbol} {args.profile.title()} Evaluation Backtest",
+                        symbol=symbol,
+                        benchmark=reporting["evaluation_benchmark"],
+                    )
+                    for split, report in (("training", training_report), ("evaluation", evaluation_report)):
+                        notifier.notify(f"{symbol} | {split}\n{report['text_report']}")
+                        notifier.send_photo(report["graphics"], f"{symbol} {split} backtest graphics")
+                        notifier.send_document(report["html"], f"{symbol} {split} QuantStats report")
+                        notifier.send_document(report["latex"], f"{symbol} {split} LaTeX tables")
                     phase_bar.update()
                 print(
                     json.dumps(
@@ -111,8 +145,11 @@ def main() -> int:
                             "symbol": symbol,
                             "profile": args.profile,
                             "eligible": manifest["eligible"],
-                            "report": str(report["html"]),
-                            "advanced_metrics": report["metrics"],
+                            "training_report": str(training_report["html"]),
+                            "evaluation_report": str(evaluation_report["html"]),
+                            "training_metrics": training_report["metrics"],
+                            "evaluation_metrics": evaluation_report["metrics"],
+                            "evaluation_buy_and_hold_metrics": evaluation_report["benchmark_metrics"],
                         },
                         sort_keys=True,
                     )

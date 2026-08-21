@@ -267,6 +267,11 @@ class BracketExecutionCore:
                 raw_exit = self._m1_close[hi - 1] if hi > lo else self._decision_close[decision_index + 1]
                 realized_r += self._close(end, raw_exit, "timeout", spread, slippage)
 
+        if self.position.direction and decision_index == len(self.decision_bars) - 2:
+            raw_exit = self._m1_close[hi - 1] if hi > lo else self._decision_close[decision_index + 1]
+            exit_time = self._m1_index[hi - 1] if hi > lo else end
+            realized_r += self._close(exit_time, raw_exit, "segment_end", spread, slippage)
+
         differential = self._differential_sharpe(realized_r)
         penalty = self.downside_penalty * min(realized_r, 0) ** 2
         reward = realized_r + self.differential_sharpe_weight * differential - penalty - holding_cost

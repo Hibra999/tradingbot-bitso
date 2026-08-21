@@ -86,6 +86,53 @@ class CandidateRun:
     returns: tuple[float, ...]
     artifact_path: str
     validation_score: float
+    timestamps: tuple[str, ...] = ()
+    training_returns: tuple[float, ...] = ()
+    training_timestamps: tuple[str, ...] = ()
+    benchmark_returns: tuple[float, ...] = ()
+    training_benchmark_returns: tuple[float, ...] = ()
+    validation_trials: tuple[float, ...] = ()
+
+
+def _segment_return_index(segments: tuple[pd.DataFrame, ...]) -> pd.DatetimeIndex:
+    values = [segment.index[1:] for segment in segments if len(segment) > 1]
+    if not values:
+        return pd.DatetimeIndex([])
+    return values[0].append(values[1:])
+
+
+def _run_series(
+    result: CandidateRun,
+    segments: tuple[pd.DataFrame, ...],
+    *,
+    training: bool = False,
+) -> pd.Series:
+    returns = result.training_returns if training else result.returns
+    timestamps = result.training_timestamps if training else result.timestamps
+    index = pd.DatetimeIndex(timestamps) if timestamps else _segment_return_index(segments)
+    if len(index) != len(returns):
+        raise ValueError("candidate returns and timestamps must align")
+    series = pd.Series(returns, index=index, dtype=float).sort_index()
+    if series.index.has_duplicates:
+        raise ValueError("candidate return timestamps must be unique")
+    return series
+
+
+def _benchmark_series(
+    result: CandidateRun,
+    strategy: pd.Series,
+    segments: tuple[pd.DataFrame, ...],
+    *,
+    training: bool = False,
+) -> pd.Series:
+    returns = result.training_benchmark_returns if training else result.benchmark_returns
+    if returns:
+        if len(returns) != len(strategy):
+            raise ValueError("candidate benchmark and strategy returns must align")
+        return pd.Series(returns, index=strategy.index, dtype=float)
+    values = [segment["Close"].pct_change().dropna().astype(float) for segment in segments]
+    benchmark = pd.concat(values).sort_index() if values else pd.Series(dtype=float)
+    return benchmark.reindex(strategy.index)
 
 
 class SB3CandidateRunner:
@@ -106,22 +153,36 @@ class SB3CandidateRunner:
         self.parallel_envs = parallel_envs
 
     @staticmethod
-    def _environment(dataset: CandidateDataset, frame: pd.DataFrame, random_seed: int = 0) -> BracketTradingEnvV2:
+    def _environment(
+        dataset: CandidateDataset,
+        frame: pd.DataFrame,
+        random_seed: int = 0,
+        *,
+        randomize: bool = True,
+    ) -> BracketTradingEnvV2:
         return BracketTradingEnvV2(
             frame,
             dataset.m1_bars,
             list(dataset.feature_columns),
             action_mode={"recurrent_ppo": "ppo", "sac": "sac", "cvar_qrdqn": "qrdqn"}[dataset.algorithm],
-            randomize=True,
+            randomize=randomize,
             random_seed=random_seed,
+            allow_short=False,
         )
 
-    def _evaluate(self, model, dataset: CandidateDataset, segments: tuple[pd.DataFrame, ...]) -> tuple[float, ...]:
-        returns: list[float] = []
+    @staticmethod
+    def _buy_and_hold(segments: tuple[pd.DataFrame, ...]) -> pd.Series:
+        values = [segment["Close"].pct_change().dropna().astype(float) for segment in segments]
+        return pd.concat(values).sort_index() if values else pd.Series(dtype=float)
+
+    def _evaluate(self, model, dataset: CandidateDataset, segments: tuple[pd.DataFrame, ...]) -> pd.Series:
+        returns: list[pd.Series] = []
         for number, segment in enumerate(segments, 1):
-            environment = self._environment(dataset, segment)
+            environment = self._environment(dataset, segment, randomize=False)
             observation, _ = environment.reset(seed=dataset.seed)
             recurrent = RecurrentPolicyRunner(model) if dataset.algorithm == "recurrent_ppo" else None
+            values: list[float] = []
+            timestamps: list[pd.Timestamp] = []
             done, previous_equity = False, environment.core.equity
             started, last = time.monotonic(), 0.0
             status = (
@@ -137,9 +198,11 @@ class SB3CandidateRunner:
             ) as progress:
                 while not done:
                     action = recurrent.predict(observation) if recurrent else model.predict(observation, deterministic=True)[0]
-                    observation, _, done, _, info = environment.step(action)
+                    observation, _, terminated, truncated, info = environment.step(action)
+                    done = terminated or truncated
                     equity = float(info["equity"])
-                    returns.append(equity / previous_equity - 1)
+                    values.append(equity / previous_equity - 1)
+                    timestamps.append(segment.index[environment.index])
                     previous_equity = equity
                     progress.update()
                     now = time.monotonic()
@@ -151,7 +214,8 @@ class SB3CandidateRunner:
                 publish = getattr(self.notifier, "progress", None)
                 if publish and progress.total:
                     publish(status, int(progress.n), int(progress.total), started)
-        return tuple(returns)
+            returns.append(pd.Series(values, index=pd.DatetimeIndex(timestamps), dtype=float))
+        return pd.concat(returns).sort_index() if returns else pd.Series(dtype=float)
 
     def __call__(self, dataset: CandidateDataset) -> CandidateRun:
         from stable_baselines3.common.callbacks import BaseCallback
@@ -208,6 +272,7 @@ class SB3CandidateRunner:
         chunk, remainder = divmod(total, self.evaluations)
         steps_by_evaluation = tuple(max(1, chunk + (evaluation < remainder)) for evaluation in range(self.evaluations))
         best_score = float("-inf")
+        validation_scores: list[float] = []
         artifact = dataset.output_dir / "best_model"
         label = (
             f"{dataset.symbol} | {dataset.algorithm} | fold {dataset.fold + 1} | "
@@ -239,7 +304,8 @@ class SB3CandidateRunner:
                 if update:
                     update(f"{status} | validation")
                 validation_returns = self._evaluate(model, dataset, (dataset.validation_segment,))
-                score = float(np.prod(1 + np.asarray(validation_returns)) - 1)
+                score = float(np.prod(1 + validation_returns.to_numpy()) - 1)
+                validation_scores.append(score)
                 if evaluation == 1 or np.isfinite(score) and (not np.isfinite(best_score) or score > best_score):
                     best_score = score
                     model.save(artifact)
@@ -253,8 +319,19 @@ class SB3CandidateRunner:
         update = getattr(notifier, "update", None)
         if update:
             update(f"{label} | test evaluation")
+        training_returns = self._evaluate(model, dataset, dataset.training_segments)
         test_returns = self._evaluate(model, dataset, dataset.test_segments)
-        return CandidateRun(test_returns, str(artifact.with_suffix(".zip")), best_score)
+        return CandidateRun(
+            tuple(test_returns.to_numpy()),
+            str(artifact.with_suffix(".zip")),
+            best_score,
+            tuple(str(value) for value in test_returns.index),
+            tuple(training_returns.to_numpy()),
+            tuple(str(value) for value in training_returns.index),
+            tuple(self._buy_and_hold(dataset.test_segments).reindex(test_returns.index).to_numpy()),
+            tuple(self._buy_and_hold(dataset.training_segments).reindex(training_returns.index).to_numpy()),
+            tuple(validation_scores),
+        )
 
 
 class TrainingEngine:
@@ -341,16 +418,16 @@ class TrainingEngine:
                     preparation_started,
                 )
 
+        candidates_by_algorithm: dict[str, list[dict[str, object]]] = {}
+        trial_sharpes: list[float] = []
+        trial_ledger: list[dict[str, object]] = []
         for algorithm in tqdm(
             self.config.rl.algorithms,
             desc=f"{symbol} algorithms",
             leave=False,
             dynamic_ncols=True,
         ):
-            runs: list[dict[str, object]] = []
-            algorithm_artifacts: list[str] = []
-            returns_by_seed: dict[int, list[float]] = {seed: [] for seed in seeds}
-            feature_manifests = [item[-1] for item in prepared]
+            candidates: list[dict[str, object]] = []
             jobs = tqdm(
                 total=len(prepared) * len(seeds),
                 desc=f"{algorithm} fold/seed jobs",
@@ -364,7 +441,7 @@ class TrainingEngine:
                 training_segments,
                 validation_segment,
                 test_segments,
-                _,
+                feature_manifest,
             ) in prepared:
                 for seed in seeds:
                     jobs.set_postfix(fold=f"{fold_number + 1}/{len(folds)}", seed=seed)
@@ -383,70 +460,124 @@ class TrainingEngine:
                     )
                     output_dir.mkdir(parents=True, exist_ok=True)
                     result = self.runner(dataset)
+                    evaluation = _run_series(result, test_segments)
+                    training = _run_series(result, training_segments, training=True)
+                    evaluation_benchmark = _benchmark_series(result, evaluation, test_segments)
+                    training_benchmark = _benchmark_series(result, training, training_segments, training=True)
+                    test_sharpe = sharpe_ratio(evaluation.to_numpy()) if len(evaluation) > 1 else float("nan")
+                    candidate = {
+                        "fold": fold_number,
+                        "seed": seed,
+                        "test_groups": list(fold.test_groups),
+                        "validation_score": result.validation_score,
+                        "test_sharpe": test_sharpe,
+                        "artifact_path": result.artifact_path,
+                        "feature_manifest": feature_manifest,
+                        "evaluation": evaluation,
+                        "training": training,
+                        "evaluation_benchmark": evaluation_benchmark,
+                        "training_benchmark": training_benchmark,
+                    }
+                    candidates.append(candidate)
+                    all_artifacts.append(result.artifact_path)
+                    trial_count = max(1, len(result.validation_trials))
+                    trial_sharpes.extend([test_sharpe] * trial_count)
+                    trial_ledger.append(
+                        {
+                            "algorithm": algorithm,
+                            "fold": fold_number,
+                            "seed": seed,
+                            "checkpoint_trials": trial_count,
+                            "validation_scores": list(result.validation_trials) or [result.validation_score],
+                            "evaluation_sharpe": test_sharpe,
+                            "artifact_path": result.artifact_path,
+                        }
+                    )
                     update = getattr(self.notifier, "update", None)
                     if update:
                         update(
                             f"{symbol} | {algorithm} | fold {fold_number + 1}/{len(folds)} | "
                             f"seed {seed} complete"
                         )
-                    returns_by_seed[seed].extend(result.returns)
-                    all_artifacts.append(result.artifact_path)
-                    algorithm_artifacts.append(result.artifact_path)
-                    runs.append(
-                        {
-                            "fold": fold_number,
-                            "seed": seed,
-                            "test_groups": list(fold.test_groups),
-                            "validation_score": result.validation_score,
-                            "test_sharpe": sharpe_ratio(result.returns) if len(result.returns) > 1 else float("nan"),
-                            "artifact_path": result.artifact_path,
-                        }
-                    )
                     jobs.update()
             jobs.close()
+            candidates_by_algorithm[algorithm] = candidates
 
-            seed_sharpes = [sharpe_ratio(values) for values in returns_by_seed.values()]
-            combined = np.concatenate([np.asarray(values) for values in returns_by_seed.values()])
-            trial_sharpes = seed_sharpes
-            if len(seeds) == 1:
-                trial_sharpes = [float(run["test_sharpe"]) for run in runs]
+        report_candidates: list[dict[str, object]] = []
+        for algorithm, candidates in candidates_by_algorithm.items():
+            selected = max(candidates, key=lambda item: float(item["validation_score"]))
+            evaluation = selected["evaluation"]
+            if not isinstance(evaluation, pd.Series):
+                raise TypeError("candidate evaluation must be a pandas Series")
             metrics = institutional_metrics(
-                combined,
+                evaluation.to_numpy(),
                 trial_sharpes=trial_sharpes,
                 bootstrap_repetitions=2_000 if self.config.profile == "full" else 100,
             )
+            seed_candidates = {
+                seed: max(
+                    (item for item in candidates if item["seed"] == seed),
+                    key=lambda item: float(item["validation_score"]),
+                )
+                for seed in seeds
+            }
             seed_evaluation = SeedHarness(seeds, smoke=self.config.profile == "smoke").run(
                 lambda seed: {
-                    "sharpe": sharpe_ratio(returns_by_seed[seed]),
+                    "sharpe": float(seed_candidates[seed]["test_sharpe"]),
                     "dsr_z": metrics["dsr_z"],
-                    "return": float(np.prod(1 + np.asarray(returns_by_seed[seed])) - 1),
+                    "return": float(
+                        np.prod(1 + seed_candidates[seed]["evaluation"].to_numpy()) - 1
+                    ),
                 }
             )
             monte_carlo = moving_block_monte_carlo(
-                combined,
+                evaluation.to_numpy(),
                 paths=self.config.validation.monte_carlo_paths,
-                block_size=min(24, len(combined)),
+                block_size=min(24, len(evaluation)),
             )
             metrics["ruin_probability_20"] = monte_carlo.ruin_probability_20
             metrics["ruin_probability_30"] = monte_carlo.ruin_probability_30
             algorithm_eligible, algorithm_reasons = promotion_gate(metrics, profile=self.config.profile)
             if algorithm_eligible:
-                eligible_artifacts.extend(algorithm_artifacts)
+                eligible_artifacts.append(str(selected["artifact_path"]))
             notify = getattr(self.notifier, "notify", None)
             if notify:
                 notify(
                     f"{symbol} | {algorithm} | {'PASS' if algorithm_eligible else 'FAIL'} | "
                     f"Sharpe {metrics['sharpe']:.4f} | SQN {metrics['sqn']:.4f}"
                 )
+            report_candidates.append({**selected, "eligible": algorithm_eligible, "algorithm": algorithm})
             algorithms[algorithm] = {
                 "eligible": algorithm_eligible,
                 "gate_reasons": algorithm_reasons,
-                "fold_results": runs,
+                "selected_artifact": selected["artifact_path"],
+                "selection_rule": "highest validation return; evaluation never selects checkpoints",
+                "fold_results": [
+                    {
+                        key: value
+                        for key, value in candidate.items()
+                        if key
+                        not in {
+                            "evaluation",
+                            "training",
+                            "evaluation_benchmark",
+                            "training_benchmark",
+                            "feature_manifest",
+                        }
+                    }
+                    for candidate in candidates
+                ],
                 "seed_evaluation": seed_evaluation.manifest(),
                 "metrics": metrics,
                 "monte_carlo": monte_carlo.manifest(),
-                "feature_manifests": feature_manifests,
+                "feature_manifest": selected["feature_manifest"],
             }
+
+        report_candidate = max(
+            (item for item in report_candidates if item["eligible"]),
+            key=lambda item: float(item["validation_score"]),
+            default=max(report_candidates, key=lambda item: float(item["validation_score"])),
+        )
 
         eligible = bool(eligible_artifacts)
         reasons = [] if eligible else ["no algorithm passed every promotion gate"]
@@ -467,6 +598,24 @@ class TrainingEngine:
             "git_sha": self._git_sha(),
             "seeds": list(seeds),
             "algorithms": algorithms,
+            "trial_count": len(trial_sharpes),
+            "trial_ledger": trial_ledger,
+            "report_candidate": {
+                "algorithm": report_candidate["algorithm"],
+                "fold": report_candidate["fold"],
+                "seed": report_candidate["seed"],
+                "artifact_path": report_candidate["artifact_path"],
+                "validation_score": report_candidate["validation_score"],
+            },
         }
         write_manifest(manifest, self.config.outputs_dir / f"{symbol.replace('/', '_')}_manifest.json")
+        manifest["_reporting"] = {
+            "training": report_candidate["training"],
+            "training_benchmark": report_candidate["training_benchmark"],
+            "evaluation": report_candidate["evaluation"],
+            "evaluation_benchmark": report_candidate["evaluation_benchmark"],
+            "algorithm": report_candidate["algorithm"],
+            "fold": report_candidate["fold"],
+            "seed": report_candidate["seed"],
+        }
         return manifest

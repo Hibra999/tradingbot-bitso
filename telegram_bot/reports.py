@@ -19,6 +19,8 @@ def generate_report(
     returns: pd.Series,
     monte_carlo: MonteCarloResult,
     destination: str | Path,
+    *,
+    benchmark: pd.Series | None = None,
 ) -> Path:
     values = returns.dropna().astype(float)
     if not isinstance(values.index, pd.DatetimeIndex) or len(values) < 2:
@@ -33,7 +35,16 @@ def generate_report(
 
     plt.style.use("dark_background")
     figure, axes = plt.subplots(2, 2, figsize=(14, 9), constrained_layout=True)
-    axes[0, 0].plot(np.arange(1, len(equity) + 1), equity, color="#38d39f", label="Observed")
+    axes[0, 0].plot(np.arange(1, len(equity) + 1), equity, color="#38d39f", label="RL model")
+    if benchmark is not None:
+        benchmark_equity = (1 + benchmark).cumprod()
+        axes[0, 0].plot(
+            np.arange(1, len(benchmark_equity) + 1),
+            benchmark_equity,
+            color="#f6c85f",
+            linewidth=1.2,
+            label="Buy & Hold",
+        )
     cone = monte_carlo.equity_cone
     axes[0, 0].fill_between(cone.index, cone["p05"], cone["p95"], color="#38d39f", alpha=0.12, label="MC 5-95%")
     axes[0, 0].plot(cone.index, cone["p50"], color="#87a49b", linewidth=1, label="MC median")
@@ -117,35 +128,57 @@ def generate_full_report(
     *,
     title: str = "Backtesting Report",
     symbol: str = "TOTAL",
+    benchmark: pd.Series | None = None,
 ) -> dict[str, Any]:
     values = returns.dropna().astype(float)
     if not isinstance(values.index, pd.DatetimeIndex) or len(values) < 2:
         raise ValueError("report returns require at least two timestamped observations")
+    benchmark_values: pd.Series | None = None
+    if benchmark is not None:
+        candidate = benchmark.dropna().astype(float).rename("Buy & Hold")
+        if not isinstance(candidate.index, pd.DatetimeIndex):
+            raise ValueError("report benchmark requires timestamped observations")
+        aligned = pd.concat((values.rename("RL model"), candidate), axis=1, join="inner").dropna()
+        if len(aligned) < 2:
+            raise ValueError("report strategy and benchmark require at least two aligned observations")
+        values, benchmark_values = aligned["RL model"], aligned["Buy & Hold"]
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     graphics = destination.with_suffix(".png")
     text_path, latex_path = destination.with_suffix(".txt"), destination.with_suffix(".tex")
-    generate_report(values, monte_carlo, graphics)
+    generate_report(values, monte_carlo, graphics, benchmark=benchmark_values)
     periods = _periods_per_year(values.index)
     array = values.to_numpy()
     metrics = advanced_metrics(array, periods)
     total = float(np.prod(1 + array) - 1)
-    wins, draws, losses = (
-        int(np.count_nonzero(array > 0)),
-        int(np.count_nonzero(array == 0)),
-        int(np.count_nonzero(array < 0)),
-    )
-    report_headers = ("Pair", "Periods", "Avg Return %", "Tot Return %", "Win", "Draw", "Loss", "Win%")
-    report_rows = [(
-        symbol,
-        str(len(values)),
-        f"{values.mean() * 100:.4f}",
-        f"{total * 100:.4f}",
-        str(wins),
-        str(draws),
-        str(losses),
-        f"{wins / len(values) * 100:.2f}",
-    )]
+    report_headers = ("Strategy", "Pair", "Periods", "Avg Return %", "Tot Return %", "Win", "Draw", "Loss", "Win%")
+
+    def report_row(name: str, series: pd.Series) -> tuple[str, ...]:
+        data = series.to_numpy(dtype=float)
+        strategy_wins = int(np.count_nonzero(data > 0))
+        strategy_draws = int(np.count_nonzero(data == 0))
+        strategy_losses = int(np.count_nonzero(data < 0))
+        strategy_total = float(np.prod(1 + data) - 1)
+        return (
+            name,
+            symbol,
+            str(len(series)),
+            f"{series.mean() * 100:.4f}",
+            f"{strategy_total * 100:.4f}",
+            str(strategy_wins),
+            str(strategy_draws),
+            str(strategy_losses),
+            f"{strategy_wins / len(series) * 100:.2f}",
+        )
+
+    report_rows = [report_row("RL model", values)]
+    benchmark_metrics: dict[str, float] | None = None
+    benchmark_total: float | None = None
+    if benchmark_values is not None:
+        report_rows.append(report_row("Buy & Hold", benchmark_values))
+        benchmark_array = benchmark_values.to_numpy(dtype=float)
+        benchmark_metrics = advanced_metrics(benchmark_array, periods)
+        benchmark_total = float(np.prod(1 + benchmark_array) - 1)
     metric_rows = [
         ("Backtesting from", str(values.index[0])),
         ("Backtesting to", str(values.index[-1])),
@@ -166,16 +199,40 @@ def generate_full_report(
         ("Monte Carlo ruin 20%", _value(monte_carlo.ruin_probability_20, percent=True)),
         ("Monte Carlo ruin 30%", _value(monte_carlo.ruin_probability_30, percent=True)),
     ]
+    metric_headers = ("Metric", "RL model", "Buy & Hold") if benchmark_metrics else ("Metric", "RL model")
+    comparison_rows = metric_rows
+    if benchmark_metrics and benchmark_total is not None and benchmark_values is not None:
+        benchmark_display = {
+            "Backtesting from": str(benchmark_values.index[0]),
+            "Backtesting to": str(benchmark_values.index[-1]),
+            "Observations": str(len(benchmark_values)),
+            "Total return": _value(benchmark_total, percent=True),
+            "Sharpe": _value(benchmark_metrics["sharpe"]),
+            "Sortino": _value(benchmark_metrics["sortino"]),
+            "Calmar": _value(benchmark_metrics["calmar"]),
+            "SQN": _value(benchmark_metrics["sqn"]),
+            "Profit factor": _value(benchmark_metrics["profit_factor"]),
+            "Expectancy": _value(benchmark_metrics["expectancy"], percent=True),
+            "Expectancy ratio": _value(benchmark_metrics["expectancy_ratio"]),
+            "Win rate": _value(benchmark_metrics["win_rate"], percent=True),
+            "Maximum drawdown": _value(benchmark_metrics["max_drawdown"], percent=True),
+            "Average drawdown": _value(benchmark_metrics["average_drawdown"], percent=True),
+            "Maximum drawdown duration": f"{benchmark_metrics['drawdown_duration_max']:.0f} periods",
+            "Average drawdown duration": f"{benchmark_metrics['drawdown_duration_mean']:.2f} periods",
+            "Monte Carlo ruin 20%": "-",
+            "Monte Carlo ruin 30%": "-",
+        }
+        comparison_rows = [(name, strategy, benchmark_display[name]) for name, strategy in metric_rows]
     text_report = "\n\n".join(
         (
             _ascii_table("BACKTESTING REPORT", report_headers, report_rows),
-            _ascii_table("SUMMARY METRICS", ("Metric", "Value"), metric_rows),
+            _ascii_table("SUMMARY METRICS", metric_headers, comparison_rows),
         )
     )
     latex = "\n\n".join(
         (
             _latex_table("Backtesting Report", report_headers, report_rows),
-            _latex_table("Summary Metrics", ("Metric", "Value"), metric_rows),
+            _latex_table("Summary Metrics", metric_headers, comparison_rows),
         )
     )
     text_path.write_text(text_report + "\n", encoding="utf-8")
@@ -185,6 +242,7 @@ def generate_full_report(
     plt.style.use("default")
     qs.reports.html(
         values,
+        benchmark=benchmark_values,
         output=str(destination),
         title=title,
         periods_per_year=periods,
@@ -197,7 +255,7 @@ def generate_full_report(
         ".local-graphic{display:block;max-width:960px;width:100%;margin:24px auto}</style>"
         f"<section class=\"local-report\"><h2>Existing Pipeline Graphics</h2><img class=\"local-graphic\" src=\"data:image/png;base64,{encoded}\" alt=\"Pipeline graphics\"></section>"
         + _html_table("Backtesting Report", report_headers, report_rows)
-        + _html_table("Summary Metrics", ("Metric", "Value"), metric_rows)
+        + _html_table("Summary Metrics", metric_headers, comparison_rows)
         + f"<section class=\"local-report\"><h2>LaTeX Tables</h2><pre>{html.escape(latex)}</pre></section>"
     )
     report = destination.read_text(encoding="utf-8")
@@ -210,4 +268,5 @@ def generate_full_report(
         "text": text_path,
         "text_report": text_report,
         "metrics": metrics,
+        "benchmark_metrics": benchmark_metrics,
     }
