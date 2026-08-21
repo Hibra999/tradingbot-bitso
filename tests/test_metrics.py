@@ -8,6 +8,7 @@ from validation import (
     centered_block_bootstrap_test,
     institutional_metrics,
     moving_block_monte_carlo,
+    probability_of_backtest_overfitting,
 )
 
 
@@ -36,6 +37,19 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(first.manifest(), second.manifest())
         self.assertTrue(0 <= first.ruin_probability_20 <= 1)
         self.assertEqual(list(first.equity_cone.columns), ["p05", "p25", "p50", "p75", "p95"])
+
+    def test_pbo_detects_selection_rank_reversal(self) -> None:
+        selection = [[2.0, 1.0], [1.0, 2.0]]
+        reversed_evaluation = [[0.0, 1.0], [1.0, 0.0]]
+        aligned_evaluation = [[1.0, 0.0], [0.0, 1.0]]
+        self.assertEqual(
+            probability_of_backtest_overfitting(selection, reversed_evaluation)["pbo_probability"],
+            1.0,
+        )
+        self.assertEqual(
+            probability_of_backtest_overfitting(selection, aligned_evaluation)["pbo_probability"],
+            0.0,
+        )
 
 
 if __name__ == "__main__":

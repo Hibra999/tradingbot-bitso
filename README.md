@@ -25,7 +25,7 @@ The safe default is a short, non-promotable verification run:
 .venv/bin/python run_quant_pipeline.py --profile smoke --symbol BTC/USD
 ```
 
-The full profile downloads the complete Alpaca M1 history, fits each feature pipeline inside every CPCV fold, trains RecurrentPPO, SAC, and CVaR QR-DQN independently for each symbol over 10 explicit seeds, and runs 5,000 moving-block Monte Carlo paths:
+The full profile downloads the complete Alpaca M1 history, runs chronological 36-month train / 6-month validation / 6-month evaluation folds, keeps the newest six complete months sealed, and trains RecurrentPPO, SAC, and CVaR QR-DQN independently for every configured seed. A development-qualified algorithm is retrained before the sealed holdout is evaluated once.
 
 ```bash
 .venv/bin/python run_quant_pipeline.py --profile full
@@ -33,7 +33,7 @@ The full profile downloads the complete Alpaca M1 history, fits each feature pip
 
 Full training belongs on the external high-resource machine. This VPS is intended for compile checks and the bounded safety suite.
 
-Research outputs include per-symbol manifests and PNG reports with observed/Monte Carlo equity, underwater drawdown, monthly returns, and return distributions. A smoke manifest can never pass promotion.
+Research outputs include per-symbol manifests plus separate training and evaluation QuantStats reports. Both reports compare the selected RL checkpoint with buy-and-hold on identical timestamps and include observed/Monte Carlo equity, underwater drawdown, monthly returns, and return distributions. A smoke manifest can never pass promotion.
 
 ## Approval and live safety
 

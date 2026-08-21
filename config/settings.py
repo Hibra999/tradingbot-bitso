@@ -98,12 +98,25 @@ class ValidationConfig:
     full_seeds: tuple[int, ...] = (0, 1)
     smoke_seeds: tuple[int, ...] = (0,)
     monte_carlo_paths: int = 5_000
+    train_months: int = 36
+    validation_months: int = 6
+    evaluation_months: int = 6
+    step_months: int = 6
+    holdout_months: int = 6
 
     def __post_init__(self) -> None:
         if not 1 <= self.test_groups < self.temporal_groups:
             raise ValueError("test_groups must be in [1, temporal_groups)")
         if self.embargo_bars < 0 or self.max_holding_bars < 1 or not self.full_seeds or not self.smoke_seeds:
             raise ValueError("validation bars and seeds must be positive")
+        if min(
+            self.train_months,
+            self.validation_months,
+            self.evaluation_months,
+            self.step_months,
+            self.holdout_months,
+        ) < 1:
+            raise ValueError("walk-forward window lengths must be positive")
 
     @classmethod
     def from_env(cls) -> "ValidationConfig":
@@ -113,6 +126,11 @@ class ValidationConfig:
             full_seeds=env_seeds("VALIDATION_FULL_SEEDS", 2),
             embargo_bars=env_int("VALIDATION_EMBARGO_BARS", 200, minimum=0),
             monte_carlo_paths=env_int("VALIDATION_MONTE_CARLO_PATHS", 5_000),
+            train_months=env_int("VALIDATION_TRAIN_MONTHS", 36),
+            validation_months=env_int("VALIDATION_VAL_MONTHS", 6),
+            evaluation_months=env_int("VALIDATION_EVAL_MONTHS", 6),
+            step_months=env_int("VALIDATION_STEP_MONTHS", 6),
+            holdout_months=env_int("VALIDATION_HOLDOUT_MONTHS", 6),
         )
 
 

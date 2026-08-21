@@ -35,6 +35,7 @@ def promotion_gate(
     profile: str,
     max_drawdown_limit: float = -0.20,
     ruin_probability_20_limit: float = 0.05,
+    pbo_limit: float = 0.10,
 ) -> tuple[bool, list[str]]:
     reasons: list[str] = []
     if profile != "full":
@@ -45,6 +46,10 @@ def promotion_gate(
         reasons.append("maximum drawdown gate failed")
     if metrics.get("ruin_probability_20", 1.0) > ruin_probability_20_limit:
         reasons.append("20% ruin-probability gate failed")
+    if metrics.get("pbo_probability", 1.0) > pbo_limit:
+        reasons.append("probability of backtest overfitting must not exceed 10%")
+    if metrics.get("excess_return_vs_buy_and_hold", float("-inf")) <= 0:
+        reasons.append("net return must exceed buy-and-hold on identical timestamps")
     return not reasons, reasons
 
 

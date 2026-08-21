@@ -130,6 +130,36 @@ def centered_block_bootstrap_test(
     return {"mean": observed, "p_value": p_value}
 
 
+def probability_of_backtest_overfitting(
+    selection_scores: np.ndarray | list[list[float]],
+    evaluation_scores: np.ndarray | list[list[float]],
+) -> dict[str, float]:
+    selection = np.asarray(selection_scores, dtype=float)
+    evaluation = np.asarray(evaluation_scores, dtype=float)
+    if selection.shape != evaluation.shape or selection.ndim != 2:
+        raise ValueError("PBO score matrices must be aligned and two-dimensional")
+    if selection.shape[0] < 2 or selection.shape[1] < 2:
+        raise ValueError("PBO requires at least two folds and two configurations")
+    logits: list[float] = []
+    for in_sample, out_of_sample in zip(selection, evaluation):
+        finite = np.isfinite(in_sample) & np.isfinite(out_of_sample)
+        if np.count_nonzero(finite) < 2:
+            continue
+        selected = int(np.nanargmax(np.where(finite, in_sample, np.nan)))
+        ranks = stats.rankdata(out_of_sample[finite], method="average")
+        selected_rank = float(ranks[np.flatnonzero(np.flatnonzero(finite) == selected)[0]])
+        relative_rank = selected_rank / (len(ranks) + 1)
+        logits.append(float(np.log(relative_rank / (1 - relative_rank))))
+    if not logits:
+        raise ValueError("PBO has no folds with finite aligned scores")
+    values = np.asarray(logits)
+    return {
+        "pbo_probability": float(np.mean(values <= 0)),
+        "pbo_median_logit": float(np.median(values)),
+        "pbo_folds": float(len(values)),
+    }
+
+
 def institutional_metrics(
     returns: np.ndarray | list[float],
     *,

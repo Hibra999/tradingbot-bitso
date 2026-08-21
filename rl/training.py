@@ -11,12 +11,14 @@ import pandas as pd
 from tqdm import tqdm
 
 from config import AppConfig
+from data import make_sliding_folds
 from quant import CausalFeaturePipeline, atr
 from validation import (
     CPCVSplitter,
     SeedHarness,
     institutional_metrics,
     moving_block_monte_carlo,
+    probability_of_backtest_overfitting,
     sharpe_ratio,
 )
 
@@ -79,6 +81,14 @@ class CandidateDataset:
     test_segments: tuple[pd.DataFrame, ...]
     m1_bars: pd.DataFrame
     output_dir: Path
+
+
+@dataclass(frozen=True)
+class _ResearchFold:
+    train_indices: np.ndarray
+    validation_indices: np.ndarray
+    episode_segments: tuple[np.ndarray, ...]
+    test_groups: tuple[object, ...]
 
 
 @dataclass(frozen=True)
@@ -353,19 +363,68 @@ class TrainingEngine:
         return result.stdout.strip() if result.returncode == 0 else "unknown"
 
     def run_symbol(self, symbol: str, decision_data: pd.DataFrame, m1_data: pd.DataFrame) -> dict[str, object]:
+        if not self.config.rl.algorithms:
+            raise ValueError("at least one RL algorithm must be enabled")
         decision_data = decision_data.copy()
         if "atr" not in decision_data:
             decision_data["atr"] = atr(decision_data)
         holding = self.config.validation.max_holding_bars
         end_positions = np.minimum(np.arange(len(decision_data)) + holding, len(decision_data) - 1)
         interval_end = pd.DatetimeIndex(decision_data.index[end_positions])
-        splitter = CPCVSplitter(
-            self.config.validation.temporal_groups,
-            self.config.validation.test_groups,
-            self.config.validation.embargo_bars,
-            holding,
-        )
-        folds = splitter.split(decision_data.index, interval_end)
+        holdout_start: pd.Timestamp | None = None
+        holdout_end: pd.Timestamp | None = None
+        folds: list[_ResearchFold] = []
+        if self.config.profile == "full":
+            latest = decision_data.index.max()
+            holdout_end = pd.Timestamp(latest.year, latest.month, 1, tz=latest.tz)
+            holdout_start = holdout_end - pd.DateOffset(months=self.config.validation.holdout_months)
+            development = decision_data.loc[decision_data.index < holdout_start]
+            windows = make_sliding_folds(
+                development,
+                train_years=self.config.validation.train_months / 12,
+                val_months=self.config.validation.validation_months,
+                test_months=self.config.validation.evaluation_months,
+                step_months=self.config.validation.step_months,
+                embargo_bars=self.config.validation.embargo_bars,
+            )
+            for training, validation, evaluation in windows:
+                train_indices = decision_data.index.get_indexer(training.index)
+                validation_indices = decision_data.index.get_indexer(validation.index)
+                evaluation_indices = decision_data.index.get_indexer(evaluation.index)
+                if min(train_indices.min(), validation_indices.min(), evaluation_indices.min()) < 0:
+                    raise ValueError("walk-forward timestamps must map to the source data")
+                folds.append(
+                    _ResearchFold(
+                        train_indices,
+                        validation_indices,
+                        (evaluation_indices,),
+                        (str(evaluation.index.min()), str(evaluation.index.max())),
+                    )
+                )
+            if len(folds) < 2:
+                raise ValueError("full validation requires at least two complete walk-forward folds")
+        else:
+            splitter = CPCVSplitter(
+                self.config.validation.temporal_groups,
+                self.config.validation.test_groups,
+                self.config.validation.embargo_bars,
+                holding,
+            )
+            for fold in splitter.split(decision_data.index, interval_end):
+                train_indices, validation_indices = internal_purged_validation_tail(
+                    fold.train_indices,
+                    decision_data.index,
+                    interval_end,
+                    embargo_bars=self.config.validation.embargo_bars,
+                )
+                folds.append(
+                    _ResearchFold(
+                        train_indices,
+                        validation_indices,
+                        fold.episode_segments,
+                        tuple(fold.test_groups),
+                    )
+                )
         seeds = self.config.validation.full_seeds if self.config.profile == "full" else self.config.validation.smoke_seeds
         algorithms: dict[str, object] = {}
         all_artifacts: list[str] = []
@@ -383,12 +442,7 @@ class TrainingEngine:
             update = getattr(self.notifier, "update", None)
             if update:
                 update(f"{symbol} | feature preparation | fold {fold_number + 1}/{len(folds)}")
-            train_indices, validation_indices = internal_purged_validation_tail(
-                fold.train_indices,
-                decision_data.index,
-                interval_end,
-                embargo_bars=self.config.validation.embargo_bars,
-            )
+            train_indices, validation_indices = fold.train_indices, fold.validation_indices
             pipeline = CausalFeaturePipeline(config_hash=self.config.config_hash, random_state=fold_number)
             pipeline.fit(decision_data.iloc[train_indices])
 
@@ -503,31 +557,91 @@ class TrainingEngine:
             jobs.close()
             candidates_by_algorithm[algorithm] = candidates
 
+        configurations = [(algorithm, seed) for algorithm in self.config.rl.algorithms for seed in seeds]
+        selection_matrix = np.asarray(
+            [
+                [
+                    next(
+                        float(candidate["validation_score"])
+                        for candidate in candidates_by_algorithm[algorithm]
+                        if candidate["fold"] == fold_number and candidate["seed"] == seed
+                    )
+                    for algorithm, seed in configurations
+                ]
+                for fold_number in range(len(folds))
+            ]
+        )
+        evaluation_matrix = np.asarray(
+            [
+                [
+                    next(
+                        float(candidate["test_sharpe"])
+                        for candidate in candidates_by_algorithm[algorithm]
+                        if candidate["fold"] == fold_number and candidate["seed"] == seed
+                    )
+                    for algorithm, seed in configurations
+                ]
+                for fold_number in range(len(folds))
+            ]
+        )
+        pbo = (
+            probability_of_backtest_overfitting(selection_matrix, evaluation_matrix)
+            if len(configurations) >= 2 and len(folds) >= 2
+            else {"pbo_probability": 1.0, "pbo_median_logit": float("nan"), "pbo_folds": 0.0}
+        )
+
         report_candidates: list[dict[str, object]] = []
         for algorithm, candidates in candidates_by_algorithm.items():
-            selected = max(candidates, key=lambda item: float(item["validation_score"]))
-            evaluation = selected["evaluation"]
-            if not isinstance(evaluation, pd.Series):
-                raise TypeError("candidate evaluation must be a pandas Series")
+            seed_candidates = {
+                seed: sorted(
+                    (item for item in candidates if item["seed"] == seed),
+                    key=lambda item: int(item["fold"]),
+                )
+                for seed in seeds
+            }
+            seed_paths: dict[int, pd.Series] = {}
+            seed_validation_scores: dict[int, float] = {}
+            for seed, items in seed_candidates.items():
+                if self.config.profile == "full":
+                    path = pd.concat([item["evaluation"] for item in items]).sort_index()
+                    if path.index.has_duplicates:
+                        raise ValueError("walk-forward evaluation timestamps must not overlap")
+                    validation_score = float(
+                        np.mean([float(item["validation_score"]) for item in items])
+                    )
+                else:
+                    representative = max(items, key=lambda item: float(item["validation_score"]))
+                    path = representative["evaluation"]
+                    validation_score = float(representative["validation_score"])
+                seed_paths[seed] = path
+                seed_validation_scores[seed] = validation_score
+            selected_seed = max(seed_validation_scores, key=seed_validation_scores.get)
+            selected = (
+                seed_candidates[selected_seed][-1]
+                if self.config.profile == "full"
+                else max(
+                    seed_candidates[selected_seed],
+                    key=lambda item: float(item["validation_score"]),
+                )
+            )
+            evaluation = seed_paths[selected_seed]
+            evaluation_benchmark = (
+                pd.concat(
+                    [item["evaluation_benchmark"] for item in seed_candidates[selected_seed]]
+                ).sort_index()
+                if self.config.profile == "full"
+                else selected["evaluation_benchmark"]
+            )
             metrics = institutional_metrics(
                 evaluation.to_numpy(),
                 trial_sharpes=trial_sharpes,
                 bootstrap_repetitions=2_000 if self.config.profile == "full" else 100,
             )
-            seed_candidates = {
-                seed: max(
-                    (item for item in candidates if item["seed"] == seed),
-                    key=lambda item: float(item["validation_score"]),
-                )
-                for seed in seeds
-            }
             seed_evaluation = SeedHarness(seeds, smoke=self.config.profile == "smoke").run(
                 lambda seed: {
-                    "sharpe": float(seed_candidates[seed]["test_sharpe"]),
+                    "sharpe": sharpe_ratio(seed_paths[seed].to_numpy()),
                     "dsr_z": metrics["dsr_z"],
-                    "return": float(
-                        np.prod(1 + seed_candidates[seed]["evaluation"].to_numpy()) - 1
-                    ),
+                    "return": float(np.prod(1 + seed_paths[seed].to_numpy()) - 1),
                 }
             )
             monte_carlo = moving_block_monte_carlo(
@@ -537,8 +651,13 @@ class TrainingEngine:
             )
             metrics["ruin_probability_20"] = monte_carlo.ruin_probability_20
             metrics["ruin_probability_30"] = monte_carlo.ruin_probability_30
+            strategy_return = float(np.prod(1 + evaluation.to_numpy()) - 1)
+            buy_and_hold_return = float(np.prod(1 + evaluation_benchmark.to_numpy()) - 1)
+            metrics["buy_and_hold_return"] = buy_and_hold_return
+            metrics["excess_return_vs_buy_and_hold"] = strategy_return - buy_and_hold_return
+            metrics.update(pbo)
             algorithm_eligible, algorithm_reasons = promotion_gate(metrics, profile=self.config.profile)
-            if algorithm_eligible:
+            if algorithm_eligible and self.config.profile != "full":
                 eligible_artifacts.append(str(selected["artifact_path"]))
             notify = getattr(self.notifier, "notify", None)
             if notify:
@@ -546,12 +665,25 @@ class TrainingEngine:
                     f"{symbol} | {algorithm} | {'PASS' if algorithm_eligible else 'FAIL'} | "
                     f"Sharpe {metrics['sharpe']:.4f} | SQN {metrics['sqn']:.4f}"
                 )
-            report_candidates.append({**selected, "eligible": algorithm_eligible, "algorithm": algorithm})
+            report_candidates.append(
+                {
+                    **selected,
+                    "eligible": algorithm_eligible,
+                    "algorithm": algorithm,
+                    "validation_score": seed_validation_scores[selected_seed],
+                    "evaluation": evaluation,
+                    "evaluation_benchmark": evaluation_benchmark,
+                    "selected_seed": selected_seed,
+                }
+            )
             algorithms[algorithm] = {
-                "eligible": algorithm_eligible,
+                "eligible": algorithm_eligible if self.config.profile != "full" else False,
+                "development_eligible": algorithm_eligible,
                 "gate_reasons": algorithm_reasons,
-                "selected_artifact": selected["artifact_path"],
-                "selection_rule": "highest validation return; evaluation never selects checkpoints",
+                "selected_artifact": selected["artifact_path"] if self.config.profile != "full" else None,
+                "selection_rule": "highest mean validation return across chronological folds",
+                "selected_seed": selected_seed,
+                "development_evaluation_range": [str(evaluation.index.min()), str(evaluation.index.max())],
                 "fold_results": [
                     {
                         key: value
@@ -573,14 +705,204 @@ class TrainingEngine:
                 "feature_manifest": selected["feature_manifest"],
             }
 
-        report_candidate = max(
+        development_champion = max(
             (item for item in report_candidates if item["eligible"]),
             key=lambda item: float(item["validation_score"]),
             default=max(report_candidates, key=lambda item: float(item["validation_score"])),
         )
+        report_candidate = development_champion
+        final_evaluation: dict[str, object] | None = None
+        if self.config.profile == "full":
+            champion_algorithm = str(development_champion["algorithm"])
+            fallback = max(
+                candidates_by_algorithm[champion_algorithm],
+                key=lambda item: float(item["validation_score"]),
+            )
+            report_candidate = {**fallback, "algorithm": champion_algorithm, "eligible": False}
+            if development_champion["eligible"]:
+                if holdout_start is None or holdout_end is None:
+                    raise RuntimeError("full validation must reserve a sealed holdout")
+                validation_start = holdout_start - pd.DateOffset(
+                    months=self.config.validation.validation_months
+                )
+                validation_start_position = int(decision_data.index.searchsorted(validation_start, side="left"))
+                holdout_start_position = int(decision_data.index.searchsorted(holdout_start, side="left"))
+                holdout_end_position = int(decision_data.index.searchsorted(holdout_end, side="left"))
+                embargo = self.config.validation.embargo_bars
+                final_train_indices = np.arange(max(validation_start_position - embargo, 0))
+                final_validation_indices = np.arange(
+                    min(validation_start_position + embargo, holdout_start_position),
+                    holdout_start_position,
+                )
+                final_holdout_indices = np.arange(
+                    min(holdout_start_position + embargo, holdout_end_position),
+                    holdout_end_position,
+                )
+                if min(
+                    len(final_train_indices),
+                    len(final_validation_indices),
+                    len(final_holdout_indices),
+                ) < 2:
+                    raise ValueError("sealed holdout split is too short after embargo")
+
+                final_pipeline = CausalFeaturePipeline(
+                    config_hash=self.config.config_hash,
+                    random_state=int(development_champion["selected_seed"]),
+                )
+                final_pipeline.fit(decision_data.iloc[final_train_indices])
+
+                def final_transformed(indices: np.ndarray, history_indices: np.ndarray) -> pd.DataFrame:
+                    raw = decision_data.iloc[indices]
+                    prior = history_indices[history_indices < indices.min()]
+                    features = final_pipeline.transform(raw, history_context=decision_data.iloc[prior])
+                    return raw.loc[features.index].join(features)
+
+                final_training = final_transformed(final_train_indices, final_train_indices)
+                final_validation = final_transformed(final_validation_indices, final_train_indices)
+                final_holdout = final_transformed(final_holdout_indices, all_prior)
+                feature_path = self.config.models_dir / symbol.replace("/", "_") / "final" / "features.pkl"
+                final_pipeline.save(feature_path)
+                final_candidates: list[dict[str, object]] = []
+                for seed in seeds:
+                    output_dir = (
+                        self.config.models_dir
+                        / symbol.replace("/", "_")
+                        / champion_algorithm
+                        / "final"
+                        / f"seed_{seed}"
+                    )
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    dataset = CandidateDataset(
+                        symbol,
+                        champion_algorithm,
+                        seed,
+                        len(folds),
+                        final_pipeline.feature_order,
+                        (final_training,),
+                        final_validation,
+                        (final_holdout,),
+                        m1_data,
+                        output_dir,
+                    )
+                    result = self.runner(dataset)
+                    training = _run_series(result, dataset.training_segments, training=True)
+                    evaluation = _run_series(result, dataset.test_segments)
+                    training_benchmark = _benchmark_series(
+                        result, training, dataset.training_segments, training=True
+                    )
+                    evaluation_benchmark = _benchmark_series(result, evaluation, dataset.test_segments)
+                    test_sharpe = sharpe_ratio(evaluation.to_numpy())
+                    final_candidates.append(
+                        {
+                            "seed": seed,
+                            "validation_score": result.validation_score,
+                            "test_sharpe": test_sharpe,
+                            "artifact_path": result.artifact_path,
+                            "training": training,
+                            "evaluation": evaluation,
+                            "training_benchmark": training_benchmark,
+                            "evaluation_benchmark": evaluation_benchmark,
+                            "feature_manifest": final_pipeline.manifest(),
+                            "feature_artifact_path": str(feature_path),
+                        }
+                    )
+                    all_artifacts.append(result.artifact_path)
+                    checkpoint_trials = max(1, len(result.validation_trials))
+                    trial_sharpes.extend([test_sharpe] * checkpoint_trials)
+                    trial_ledger.append(
+                        {
+                            "algorithm": champion_algorithm,
+                            "fold": "sealed_holdout",
+                            "seed": seed,
+                            "checkpoint_trials": checkpoint_trials,
+                            "validation_scores": list(result.validation_trials) or [result.validation_score],
+                            "evaluation_sharpe": test_sharpe,
+                            "artifact_path": result.artifact_path,
+                        }
+                    )
+                report_candidate = max(
+                    final_candidates,
+                    key=lambda item: float(item["validation_score"]),
+                )
+                report_candidate = {
+                    **report_candidate,
+                    "algorithm": champion_algorithm,
+                    "fold": "sealed_holdout",
+                }
+                holdout_returns = report_candidate["evaluation"]
+                final_metrics = institutional_metrics(
+                    holdout_returns.to_numpy(),
+                    trial_sharpes=trial_sharpes,
+                    bootstrap_repetitions=2_000,
+                )
+                final_monte_carlo = moving_block_monte_carlo(
+                    holdout_returns.to_numpy(),
+                    paths=self.config.validation.monte_carlo_paths,
+                    block_size=min(24, len(holdout_returns)),
+                )
+                final_metrics.update(
+                    {
+                        "ruin_probability_20": final_monte_carlo.ruin_probability_20,
+                        "ruin_probability_30": final_monte_carlo.ruin_probability_30,
+                        "buy_and_hold_return": float(
+                            np.prod(1 + report_candidate["evaluation_benchmark"].to_numpy()) - 1
+                        ),
+                        **pbo,
+                    }
+                )
+                final_metrics["excess_return_vs_buy_and_hold"] = float(
+                    np.prod(1 + holdout_returns.to_numpy()) - 1
+                ) - final_metrics["buy_and_hold_return"]
+                final_eligible, final_reasons = promotion_gate(
+                    final_metrics,
+                    profile=self.config.profile,
+                )
+                report_candidate["eligible"] = final_eligible
+                if final_eligible:
+                    eligible_artifacts.append(str(report_candidate["artifact_path"]))
+                final_evaluation = {
+                    "eligible": final_eligible,
+                    "gate_reasons": final_reasons,
+                    "algorithm": champion_algorithm,
+                    "selected_seed": report_candidate["seed"],
+                    "selected_artifact": report_candidate["artifact_path"],
+                    "feature_artifact_path": str(feature_path),
+                    "training_range": [
+                        str(report_candidate["training"].index.min()),
+                        str(report_candidate["training"].index.max()),
+                    ],
+                    "holdout_range": [str(holdout_returns.index.min()), str(holdout_returns.index.max())],
+                    "metrics": final_metrics,
+                    "monte_carlo": final_monte_carlo.manifest(),
+                    "seed_results": [
+                        {
+                            key: value
+                            for key, value in candidate.items()
+                            if key
+                            not in {
+                                "training",
+                                "evaluation",
+                                "training_benchmark",
+                                "evaluation_benchmark",
+                                "feature_manifest",
+                            }
+                        }
+                        for candidate in final_candidates
+                    ],
+                }
+                algorithms[champion_algorithm]["eligible"] = final_eligible
+                algorithms[champion_algorithm]["final_evaluation"] = final_evaluation
 
         eligible = bool(eligible_artifacts)
-        reasons = [] if eligible else ["no algorithm passed every promotion gate"]
+        reasons = (
+            []
+            if eligible
+            else list(final_evaluation["gate_reasons"])
+            if final_evaluation is not None
+            else ["no algorithm passed every development promotion gate; sealed holdout was not opened"]
+            if self.config.profile == "full"
+            else ["no algorithm passed every promotion gate"]
+        )
         manifest: dict[str, object] = {
             "schema_version": 1,
             "model_id": f"{symbol.replace('/', '_')}-{self._git_sha()[:12]}",
@@ -600,6 +922,20 @@ class TrainingEngine:
             "algorithms": algorithms,
             "trial_count": len(trial_sharpes),
             "trial_ledger": trial_ledger,
+            "pbo": pbo,
+            "validation_protocol": {
+                "outer": "rolling" if self.config.profile == "full" else "cpcv-smoke",
+                "train_months": self.config.validation.train_months if self.config.profile == "full" else None,
+                "validation_months": self.config.validation.validation_months if self.config.profile == "full" else None,
+                "evaluation_months": self.config.validation.evaluation_months if self.config.profile == "full" else None,
+                "step_months": self.config.validation.step_months if self.config.profile == "full" else None,
+                "sealed_holdout": (
+                    [str(holdout_start), str(holdout_end)]
+                    if holdout_start is not None and holdout_end is not None
+                    else None
+                ),
+            },
+            "final_evaluation": final_evaluation,
             "report_candidate": {
                 "algorithm": report_candidate["algorithm"],
                 "fold": report_candidate["fold"],

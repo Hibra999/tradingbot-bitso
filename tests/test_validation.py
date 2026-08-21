@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 import pandas as pd
 
+from data import make_sliding_folds
 from validation import CPCVSplitter, DomainRandomizer, SeedHarness
 
 
@@ -40,6 +41,26 @@ class ValidationTests(unittest.TestCase):
         self.assertTrue(evaluation.sri_pass)
         self.assertEqual(evaluation.manifest()["seeds"], list(range(10)))
         self.assertIn("iqr", evaluation.aggregate["return"])
+
+    def test_sliding_folds_have_non_overlapping_chronological_evaluations(self) -> None:
+        index = pd.date_range("2018-01-01", "2025-01-01", freq="h", inclusive="left", tz="UTC")
+        frame = pd.DataFrame({"Close": np.arange(len(index), dtype=float) + 1}, index=index)
+        folds = make_sliding_folds(
+            frame,
+            train_years=3,
+            val_months=6,
+            test_months=6,
+            step_months=6,
+            embargo_bars=24,
+        )
+        self.assertGreaterEqual(len(folds), 2)
+        previous_end = None
+        for training, validation, evaluation in folds:
+            self.assertLess(training.index.max(), validation.index.min())
+            self.assertLess(validation.index.max(), evaluation.index.min())
+            if previous_end is not None:
+                self.assertLess(previous_end, evaluation.index.min())
+            previous_end = evaluation.index.max()
 
 
 if __name__ == "__main__":

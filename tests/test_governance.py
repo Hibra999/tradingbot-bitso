@@ -25,7 +25,13 @@ class GovernanceTests(unittest.TestCase):
             self.assertLess(ends[item], index[validation].min())
 
     def test_live_loading_needs_full_gate_operator_selection_and_two_flags(self) -> None:
-        metrics = {"dsr_p_value": 0.01, "max_drawdown": -0.1, "ruin_probability_20": 0.01}
+        metrics = {
+            "dsr_p_value": 0.01,
+            "max_drawdown": -0.1,
+            "ruin_probability_20": 0.01,
+            "pbo_probability": 0.0,
+            "excess_return_vs_buy_and_hold": 0.05,
+        }
         self.assertFalse(promotion_gate(metrics, profile="smoke")[0])
         self.assertTrue(promotion_gate(metrics, profile="full")[0])
         with tempfile.TemporaryDirectory() as folder:
