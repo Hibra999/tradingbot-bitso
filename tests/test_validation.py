@@ -41,6 +41,8 @@ class ValidationTests(unittest.TestCase):
         self.assertTrue(evaluation.sri_pass)
         self.assertEqual(evaluation.manifest()["seeds"], list(range(10)))
         self.assertIn("iqr", evaluation.aggregate["return"])
+        self.assertIn("iqm", evaluation.aggregate["return"])
+        self.assertIn("ci95_low", evaluation.aggregate["return"])
 
     def test_sliding_folds_have_non_overlapping_chronological_evaluations(self) -> None:
         index = pd.date_range("2018-01-01", "2025-01-01", freq="h", inclusive="left", tz="UTC")

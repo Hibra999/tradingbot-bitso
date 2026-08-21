@@ -81,7 +81,15 @@ async def serve(args: argparse.Namespace) -> None:
             if manifest_path:
                 manifest = load_eligible_manifest(manifest_path)
 
-        policy = LivePolicyRuntime(manifest, config.data_dir / "bitso_live") if manifest else None
+        policy = (
+            LivePolicyRuntime(
+                manifest,
+                config.data_dir / "bitso_live",
+                minimum_shadow_days=None if live else 0,
+            )
+            if manifest
+            else None
+        )
         if policy and policy.book not in stream.books:
             raise RuntimeError("approved policy book is not configured for this service")
         if policy and not engine.is_flat:

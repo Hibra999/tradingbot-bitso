@@ -127,7 +127,13 @@ def centered_block_bootstrap_test(
     bootstrap_means = samples.mean(axis=1)
     observed = float(values.mean())
     p_value = float((1 + np.count_nonzero(np.abs(bootstrap_means) >= abs(observed))) / (repetitions + 1))
-    return {"mean": observed, "p_value": p_value}
+    ci_low, ci_high = np.quantile(bootstrap_means + observed, [0.025, 0.975])
+    return {
+        "mean": observed,
+        "p_value": p_value,
+        "ci95_low": float(ci_low),
+        "ci95_high": float(ci_high),
+    }
 
 
 def probability_of_backtest_overfitting(
@@ -195,6 +201,8 @@ def institutional_metrics(
         "t_statistic": float(t_test.statistic),
         "t_test_p_value": float(t_test.pvalue),
         "bootstrap_p_value": bootstrap["p_value"],
+        "bootstrap_mean_ci95_low": bootstrap["ci95_low"],
+        "bootstrap_mean_ci95_high": bootstrap["ci95_high"],
         "max_drawdown": float(drawdowns(values).min()),
     }
     result.update(advanced_metrics(values, periods_per_year))

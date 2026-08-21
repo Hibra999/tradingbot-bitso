@@ -31,7 +31,13 @@ class PolicyDecision:
 
 
 class LivePolicyRuntime:
-    def __init__(self, manifest: dict[str, Any], market_data_dir: str | Path):
+    def __init__(
+        self,
+        manifest: dict[str, Any],
+        market_data_dir: str | Path,
+        *,
+        minimum_shadow_days: int | None = None,
+    ):
         bundle = manifest.get("artifact_bundle")
         if not isinstance(bundle, dict) or bundle.get("action_contract") != "long_flat_spot":
             raise PermissionError("live policy requires a complete long/flat artifact bundle")
@@ -51,7 +57,18 @@ class LivePolicyRuntime:
             len(fracdiff_weights(self.pipeline.fracdiff_selection.d, self.pipeline.fracdiff_threshold)),
             168,
         )
-        self.max_m1_bars = self.required_h1_bars * 60 + 60
+        self.minimum_shadow_days = int(
+            bundle.get("minimum_shadow_days", 30)
+            if minimum_shadow_days is None
+            else minimum_shadow_days
+        )
+        if self.minimum_shadow_days < 0:
+            raise PermissionError("minimum shadow period cannot be negative")
+        self.required_m1_bars = max(
+            self.required_h1_bars * 60,
+            self.minimum_shadow_days * 24 * 60,
+        )
+        self.max_m1_bars = self.required_m1_bars + 60
         self.model = self._load_model(bundle["model_path"])
         self._validate_action_space()
         self.recurrent = RecurrentPolicyRunner(self.model) if self.algorithm == "recurrent_ppo" else None
@@ -146,7 +163,7 @@ class LivePolicyRuntime:
         if timestamp.minute != 0:
             return None
         write_parquet(self.m1, self.history_path, {"source": "bitso_public_book_midprice"})
-        required_m1 = self.required_h1_bars * 60
+        required_m1 = self.required_m1_bars
         if len(self.m1) < required_m1:
             return None
         recent = self.m1.index[-required_m1:]

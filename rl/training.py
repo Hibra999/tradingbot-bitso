@@ -732,6 +732,20 @@ class TrainingEngine:
             metrics["stress_return"] = float(
                 np.prod(1 + seed_stress_paths[selected_seed].to_numpy()) - 1
             )
+            fold_returns = np.asarray(
+                [
+                    float(np.prod(1 + item["evaluation"].to_numpy()) - 1)
+                    for item in seed_candidates[selected_seed]
+                ]
+            )
+            positive_fold_returns = fold_returns[fold_returns > 0]
+            metrics["profitable_fold_fraction"] = float(np.mean(fold_returns > 0))
+            metrics["max_fold_profit_share"] = (
+                float(positive_fold_returns.max() / positive_fold_returns.sum())
+                if len(positive_fold_returns)
+                else 1.0
+            )
+            metrics["seed_stability_pass"] = seed_evaluation.sri_pass
             metrics.update(pbo)
             algorithm_eligible, algorithm_reasons = promotion_gate(metrics, profile=self.config.profile)
             if algorithm_eligible and self.config.profile != "full":
@@ -943,6 +957,13 @@ class TrainingEngine:
                 final_metrics["excess_return_vs_buy_and_hold"] = float(
                     np.prod(1 + holdout_returns.to_numpy()) - 1
                 ) - final_metrics["buy_and_hold_return"]
+                development_metrics = algorithms[champion_algorithm]["metrics"]
+                for metric in (
+                    "profitable_fold_fraction",
+                    "max_fold_profit_share",
+                    "seed_stability_pass",
+                ):
+                    final_metrics[metric] = development_metrics[metric]
                 final_eligible, final_reasons = promotion_gate(
                     final_metrics,
                     profile=self.config.profile,
@@ -1009,6 +1030,7 @@ class TrainingEngine:
                 "decision_frequency": "1h",
                 "execution_delay": "next_m1_tick",
                 "feature_z_limit": 10.0,
+                "minimum_shadow_days": 30,
                 "commission_bps": self.config.validation.commission_bps,
                 "base_spread_bps": self.config.validation.base_spread_bps,
                 "sha256": {

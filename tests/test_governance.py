@@ -32,6 +32,10 @@ class GovernanceTests(unittest.TestCase):
             "pbo_probability": 0.0,
             "excess_return_vs_buy_and_hold": 0.05,
             "stress_return": 0.01,
+            "bootstrap_mean_ci95_low": 0.0001,
+            "seed_stability_pass": True,
+            "profitable_fold_fraction": 0.8,
+            "max_fold_profit_share": 0.4,
         }
         self.assertFalse(promotion_gate(metrics, profile="smoke")[0])
         self.assertTrue(promotion_gate(metrics, profile="full")[0])

@@ -28,6 +28,7 @@ class MetricsTests(unittest.TestCase):
         first = centered_block_bootstrap_test(returns, repetitions=100, seed=8)
         second = centered_block_bootstrap_test(returns, repetitions=100, seed=8)
         self.assertEqual(first, second)
+        self.assertLess(first["ci95_low"], first["ci95_high"])
 
     def test_monte_carlo_is_batched_seeded_and_reports_ruin(self) -> None:
         returns = np.array([0.01, -0.005, 0.002, -0.001] * 20)

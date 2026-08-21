@@ -60,7 +60,7 @@ class RuntimeTests(unittest.TestCase):
             "rl.runtime.write_parquet"
         ), patch.object(LivePolicyRuntime, "_decision_frame", return_value=decision):
             runtime = LivePolicyRuntime(manifest, Path(folder))
-            runtime.required_h1_bars = 0
+            runtime.required_m1_bars = 0
             result = runtime.on_closed_m1(
                 decision_index[-1],
                 {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5},

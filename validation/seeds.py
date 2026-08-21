@@ -16,11 +16,20 @@ def aggregate_seed_results(results: list[Mapping[str, float]]) -> dict[str, dict
         values = values[np.isfinite(values)]
         if len(values):
             q1, q3 = np.percentile(values, [25, 75])
+            ordered = np.sort(values)
+            trim = int(np.floor(len(ordered) * 0.25))
+            middle = ordered[trim : len(ordered) - trim] if trim else ordered
+            rng = np.random.default_rng(0)
+            bootstrap = rng.choice(values, size=(2_000, len(values)), replace=True).mean(axis=1)
+            ci_low, ci_high = np.quantile(bootstrap, [0.025, 0.975])
             output[metric] = {
                 "mean": float(values.mean()),
                 "std": float(values.std(ddof=1)) if len(values) > 1 else 0.0,
                 "median": float(np.median(values)),
                 "iqr": float(q3 - q1),
+                "iqm": float(middle.mean()),
+                "ci95_low": float(ci_low),
+                "ci95_high": float(ci_high),
             }
     return output
 

@@ -60,6 +60,14 @@ def promotion_gate(
         reasons.append("net return must exceed buy-and-hold on identical timestamps")
     if metrics.get("stress_return", float("-inf")) <= 0:
         reasons.append("stressed execution return must remain positive")
+    if metrics.get("bootstrap_mean_ci95_low", float("-inf")) <= 0:
+        reasons.append("95% block-bootstrap mean-return lower bound must be positive")
+    if not bool(metrics.get("seed_stability_pass", False)):
+        reasons.append("seed stability gate failed")
+    if metrics.get("profitable_fold_fraction", 0.0) < 0.70:
+        reasons.append("at least 70% of evaluation folds must be profitable")
+    if metrics.get("max_fold_profit_share", 1.0) > 0.50:
+        reasons.append("one evaluation fold contributes more than half of positive profit")
     return not reasons, reasons
 
 
