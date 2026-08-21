@@ -246,13 +246,15 @@ class SB3CandidateRunner:
         evaluations: int = 5,
         notifier: object | None = None,
         parallel_envs: int = 16,
+        off_policy_envs: int = 8,
     ):
-        if evaluations < 1 or parallel_envs < 1:
-            raise ValueError("evaluations and parallel_envs must be positive")
+        if evaluations < 1 or parallel_envs < 1 or off_policy_envs < 1:
+            raise ValueError("evaluations and environment counts must be positive")
         self.timesteps = timesteps
         self.evaluations = evaluations
         self.notifier = notifier
         self.parallel_envs = parallel_envs
+        self.off_policy_envs = off_policy_envs
 
     @staticmethod
     def _environment(
@@ -422,9 +424,8 @@ class SB3CandidateRunner:
         segments = dataset.training_segments
         if not segments:
             raise ValueError("training segments must not be empty")
-        environment_count = (
-            max(len(segments), self.parallel_envs) if dataset.algorithm == "recurrent_ppo" else len(segments)
-        )
+        target_envs = self.parallel_envs if dataset.algorithm == "recurrent_ppo" else self.off_policy_envs
+        environment_count = max(len(segments), target_envs)
         factories = [
             lambda frame=segments[index % len(segments)], seed=dataset.seed + index: self._environment(
                 dataset, frame, seed
@@ -539,7 +540,11 @@ class TrainingEngine:
     ):
         self.config = config
         self.runner = runner or SB3CandidateRunner(
-            config.rl.timesteps, config.rl.evaluations, notifier, config.rl.recurrent_ppo_envs
+            config.rl.timesteps,
+            config.rl.evaluations,
+            notifier,
+            config.rl.recurrent_ppo_envs,
+            config.rl.off_policy_envs,
         )
         self.notifier = notifier
 

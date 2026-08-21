@@ -65,6 +65,7 @@ def moving_block_monte_carlo(
         path_matrix = np.memmap(f"{folder}/equity.dat", mode="w+", dtype="float32", shape=(paths, horizon))
         block_count = int(np.ceil(horizon / block_size))
         offsets = np.arange(block_size)
+        columns = np.arange(horizon, dtype=np.int32)
         for start in range(0, paths, batch_size):
             stop = min(start + batch_size, paths)
             count = stop - start
@@ -74,12 +75,11 @@ def moving_block_monte_carlo(
             np.cumprod(sampled, axis=1, out=sampled)
             equity = sampled
             equity *= initial_equity
-            peaks = np.maximum.accumulate(equity, axis=1)
-            drawdown = equity / peaks
+            drawdown = np.maximum.accumulate(equity, axis=1)
+            np.divide(equity, drawdown, out=drawdown)
             drawdown -= 1
             maximum_drawdown[start:stop] = drawdown.min(axis=1)
             terminal[start:stop] = equity[:, -1]
-            columns = np.arange(horizon, dtype=np.int32)
             last_peak = np.where(drawdown < 0, -1, columns)
             np.maximum.accumulate(last_peak, axis=1, out=last_peak)
             np.subtract(columns, last_peak, out=last_peak)

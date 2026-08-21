@@ -50,8 +50,11 @@ CACHE_ONLY=true
 RL_RECURRENT_PPO_ENABLED=true
 RL_RECURRENT_PPO_TIMESTEPS=100000
 RL_RECURRENT_PPO_ENVS=16
+RL_OFF_POLICY_ENVS=8
 RL_SAC_ENABLED=true
 RL_SAC_TIMESTEPS=100000
+RL_TQC_ENABLED=true
+RL_TQC_TIMESTEPS=100000
 RL_CVAR_QRDQN_ENABLED=true
 RL_CVAR_QRDQN_TIMESTEPS=100000
 RL_EVALUATIONS=5
@@ -156,6 +159,8 @@ The current notifier uses an update thread and the Telegram Bot API via `httpx`.
 
 RTX 5070 OPTIMIZATION
 
+Apply the `optimize-for-gpu` audit to the entire pipeline and all four model paths on every performance change. Prefer an installed, native-Windows-compatible library only when profiling demonstrates lower end-to-end runtime after transfer and compilation overhead.
+
 The priority is reducing actual runtime, not artificially inflating `it/s`.
 
 Current situation:
@@ -165,8 +170,9 @@ Current situation:
 - The minibatch can reach 1024.
 - PyTorch enables TF32 for matmul and cuDNN.
 - Optimizers use `foreach=True`.
-- SAC groups training with `train_freq=(16, "step")` and `gradient_steps=16`.
-- CVaR QR-DQN groups with `train_freq=(32, "step")` and `gradient_steps=8`.
+- SAC and TQC group training with `train_freq=(16, "step")` and 16 gradient steps per environment.
+- CVaR QR-DQN groups training with `train_freq=(32, "step")` and 8 gradient steps per environment.
+- SAC, TQC, and CVaR QR-DQN batch rollout inference across `RL_OFF_POLICY_ENVS`, default 8, and scale gradient steps with the environment count to preserve update density.
 - The training environment avoids creating `Decimal`, `TradeIntent`, and `StepResult` at each timestep by using an internal primitive values route.
 - The public APIs of `TradeIntent` and `StepResult` must be preserved.
 

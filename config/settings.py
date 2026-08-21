@@ -74,7 +74,7 @@ class BitsoConfig:
 
 @dataclass(frozen=True)
 class RLConfig:
-    algorithms: tuple[str, ...] = ("recurrent_ppo", "tqc")
+    algorithms: tuple[str, ...] = ("recurrent_ppo", "sac", "tqc", "cvar_qrdqn")
     risk_fractions: tuple[float, ...] = (0.005, 0.01, 0.02, 0.03)
     sl_atr_multipliers: tuple[float, ...] = (1.0, 1.5, 2.5, 3.5)
     tp_sl_ratios: tuple[float, ...] = (1.0, 1.5, 2.0, 4.0)
@@ -89,6 +89,7 @@ class RLConfig:
     )
     evaluations: int = 5
     recurrent_ppo_envs: int = 16
+    off_policy_envs: int = 8
 
     @classmethod
     def from_env(cls) -> "RLConfig":
@@ -102,11 +103,12 @@ class RLConfig:
             algorithms=tuple(
                 name
                 for name, prefix in names.items()
-                if env_flag(f"{prefix}_ENABLED", name in {"recurrent_ppo", "tqc"})
+                if env_flag(f"{prefix}_ENABLED", True)
             ),
             timesteps={name: env_int(f"{prefix}_TIMESTEPS", 100_000) for name, prefix in names.items()},
             evaluations=env_int("RL_EVALUATIONS", 5),
             recurrent_ppo_envs=env_int("RL_RECURRENT_PPO_ENVS", 16),
+            off_policy_envs=env_int("RL_OFF_POLICY_ENVS", 8),
         )
 
 

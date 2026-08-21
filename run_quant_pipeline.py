@@ -88,7 +88,13 @@ def main() -> int:
             )
 
     runner = (
-        SB3CandidateRunner(config.rl.timesteps, config.rl.evaluations, notifier, config.rl.recurrent_ppo_envs)
+        SB3CandidateRunner(
+            config.rl.timesteps,
+            config.rl.evaluations,
+            notifier,
+            config.rl.recurrent_ppo_envs,
+            config.rl.off_policy_envs,
+        )
         if args.profile == "full"
         else SmokeRunner()
     )

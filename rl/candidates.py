@@ -69,13 +69,14 @@ def build_sac(env: Any, *, seed: int, **overrides: Any):
     _require_pinned_stack()
     from stable_baselines3 import SAC
 
-    batch_size = min(512, max(256, 64 * getattr(env, "num_envs", 1)))
+    num_envs = getattr(env, "num_envs", 1)
+    batch_size = min(512, max(256, 64 * num_envs))
     options = {
         "learning_rate": 3e-4,
         "buffer_size": 100_000,
         "batch_size": batch_size,
         "train_freq": (16, "step"),
-        "gradient_steps": 16,
+        "gradient_steps": 16 * num_envs,
         "policy_kwargs": {"optimizer_kwargs": {"foreach": True}},
         "device": _torch_device(),
         "seed": seed,
@@ -89,13 +90,14 @@ def build_tqc(env: Any, *, seed: int, **overrides: Any):
     _require_pinned_stack()
     from sb3_contrib import TQC
 
-    batch_size = min(512, max(256, 64 * getattr(env, "num_envs", 1)))
+    num_envs = getattr(env, "num_envs", 1)
+    batch_size = min(512, max(256, 64 * num_envs))
     options = {
         "learning_rate": 3e-4,
         "buffer_size": 100_000,
         "batch_size": batch_size,
         "train_freq": (16, "step"),
-        "gradient_steps": 16,
+        "gradient_steps": 16 * num_envs,
         "top_quantiles_to_drop_per_net": 2,
         "policy_kwargs": {
             "n_critics": 5,
@@ -198,13 +200,14 @@ class CVaRQRDQN(QRDQN):  # type: ignore[misc,valid-type]
 
 
 def build_cvar_qrdqn(env: Any, *, seed: int, **overrides: Any) -> CVaRQRDQN:
-    batch_size = min(256, max(64, 16 * getattr(env, "num_envs", 1)))
+    num_envs = getattr(env, "num_envs", 1)
+    batch_size = min(256, max(64, 16 * num_envs))
     options = {
         "learning_rate": 5e-5,
         "buffer_size": 100_000,
         "batch_size": batch_size,
         "train_freq": (32, "step"),
-        "gradient_steps": 8,
+        "gradient_steps": 8 * num_envs,
         "policy_kwargs": {"n_quantiles": 200, "net_arch": [128, 64], "optimizer_kwargs": {"foreach": True}},
         "device": _torch_device(),
         "seed": seed,

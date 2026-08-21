@@ -31,7 +31,7 @@ The first run after this schema upgrade must populate and validate the public Bi
 .venv/bin/python run_quant_pipeline.py --profile smoke --symbol BTC/USD --no-cache-only
 ```
 
-The full profile uses chronological 36-month train / 6-month validation / 6-month evaluation folds, keeps the newest six complete months sealed, and trains RecurrentPPO and TQC over five seeds by default. SAC and CVaR QR-DQN remain available as explicitly enabled research challengers. A development-qualified algorithm is retrained before the sealed holdout is evaluated once.
+The full profile uses chronological 36-month train / 6-month validation / 6-month evaluation folds, keeps the newest six complete months sealed, and trains RecurrentPPO, SAC, TQC, and CVaR QR-DQN over five seeds by default. A development-qualified algorithm is retrained before the sealed holdout is evaluated once.
 
 ```bash
 .venv/bin/python run_quant_pipeline.py --profile full
