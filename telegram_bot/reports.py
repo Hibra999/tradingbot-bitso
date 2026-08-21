@@ -87,6 +87,23 @@ def _ascii_table(title: str, headers: tuple[str, ...], rows: list[tuple[str, ...
     return "\n".join((title.center(len(border)), border, render(headers), border, *(render(row) for row in rows), border))
 
 
+def _telegram_table(
+    title: str,
+    headers: tuple[str, ...],
+    rows: list[tuple[str, ...]],
+) -> str:
+    widths = [max(len(row[i]) for row in (headers, *rows)) for i in range(len(headers))]
+    lines = [
+        "  ".join(
+            value.ljust(widths[i]) if i == 0 else value.rjust(widths[i])
+            for i, value in enumerate(row)
+        ).rstrip()
+        for row in (headers, *rows)
+    ]
+    lines.insert(1, "  ".join("-" * width for width in widths))
+    return f"<b>{html.escape(title)}</b>\n<pre>{html.escape(chr(10).join(lines))}</pre>"
+
+
 def _tex(value: str) -> str:
     replacements = {
         "\\": r"\textbackslash{}",
@@ -104,12 +121,15 @@ def _tex(value: str) -> str:
 
 
 def _latex_table(title: str, headers: tuple[str, ...], rows: list[tuple[str, ...]]) -> str:
-    body = "\n".join(" & ".join(_tex(value) for value in row) + r" \\" for row in (headers, *rows))
+    header = " & ".join(_tex(value) for value in headers) + r" \\"
+    body = "\n".join(" & ".join(_tex(value) for value in row) + r" \\" for row in rows)
     return (
-        "\\begin{table}[ht]\n\\centering\n"
+        "\\begin{table}[htbp]\n\\centering\n"
         f"\\caption{{{_tex(title)}}}\n"
+        "\\resizebox{\\textwidth}{!}{%\n"
         f"\\begin{{tabular}}{{{'l' + 'r' * (len(headers) - 1)}}}\n\\hline\n"
-        f"{body}\n\\hline\n\\end{{tabular}}\n\\end{{table}}"
+        f"{header}\n\\hline\n{body}\n\\hline\n"
+        "\\end{tabular}%\n}\n\\end{table}"
     )
 
 
@@ -223,17 +243,43 @@ def generate_full_report(
             "Monte Carlo ruin 30%": "-",
         }
         comparison_rows = [(name, strategy, benchmark_display[name]) for name, strategy in metric_rows]
+    compact_labels = {
+        "Total return": "Return",
+        "Sharpe": "Sharpe",
+        "Sortino": "Sortino",
+        "Calmar": "Calmar",
+        "Profit factor": "Profit factor",
+        "Win rate": "Win rate",
+        "Maximum drawdown": "Max drawdown",
+        "Monte Carlo ruin 20%": "MC ruin 20%",
+    }
+    compact_rows = [
+        (compact_labels[row[0]], *row[1:])
+        for row in comparison_rows
+        if row[0] in compact_labels
+    ]
+    compact_headers = ("Metric", "RL", "B&H") if benchmark_metrics else ("Metric", "RL")
+    telegram_report = _telegram_table(title, compact_headers, compact_rows)
     text_report = "\n\n".join(
         (
             _ascii_table("BACKTESTING REPORT", report_headers, report_rows),
             _ascii_table("SUMMARY METRICS", metric_headers, comparison_rows),
         )
     )
-    latex = "\n\n".join(
+    latex_tables = "\n\n".join(
         (
             _latex_table("Backtesting Report", report_headers, report_rows),
             _latex_table("Summary Metrics", metric_headers, comparison_rows),
         )
+    )
+    latex = (
+        "\\documentclass{article}\n"
+        "\\usepackage[margin=18mm]{geometry}\n"
+        "\\usepackage{graphicx}\n"
+        "\\begin{document}\n"
+        "\\renewcommand{\\arraystretch}{1.15}\n"
+        f"{latex_tables}\n"
+        "\\end{document}"
     )
     text_path.write_text(text_report + "\n", encoding="utf-8")
     latex_path.write_text(latex + "\n", encoding="utf-8")
@@ -267,6 +313,7 @@ def generate_full_report(
         "latex": latex_path,
         "text": text_path,
         "text_report": text_report,
+        "telegram_report": telegram_report,
         "metrics": metrics,
         "benchmark_metrics": benchmark_metrics,
     }

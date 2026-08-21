@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import os
 import threading
 import time
@@ -55,18 +56,42 @@ class PipelineNotifier:
         for chat_id in self._chat_ids:
             self._post("sendMessage", json={"chat_id": chat_id, "text": text[:4000]})
 
+    def notify_html(self, text: str) -> None:
+        for chat_id in self._chat_ids:
+            self._post(
+                "sendMessage",
+                json={"chat_id": chat_id, "text": text[:4000], "parse_mode": "HTML"},
+            )
+
     def _publish_status(self) -> None:
         with self._state_lock:
-            text = f"{self._status}\nElapsed: {int(time.monotonic() - self._started)}s"[:4000]
+            elapsed = int(time.monotonic() - self._started)
+            hours, remainder = divmod(elapsed, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            text = (
+                "<b>QUANT PIPELINE</b>\n"
+                f"<pre>{html.escape(self._status)}\n\nElapsed  {hours:02d}:{minutes:02d}:{seconds:02d}</pre>"
+            )[:4000]
         for chat_id in self._chat_ids:
             message_id = self._message_ids.get(chat_id)
             result = (
-                self._post("editMessageText", json={"chat_id": chat_id, "message_id": message_id, "text": text})
+                self._post(
+                    "editMessageText",
+                    json={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "text": text,
+                        "parse_mode": "HTML",
+                    },
+                )
                 if message_id
                 else None
             )
             if result is None:
-                result = self._post("sendMessage", json={"chat_id": chat_id, "text": text})
+                result = self._post(
+                    "sendMessage",
+                    json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+                )
             if result:
                 self._message_ids[chat_id] = int(result["message_id"])
 
@@ -111,7 +136,10 @@ class PipelineNotifier:
     def notify_phase(self, phase: str, symbol: str, detail: str = "") -> None:
         text = f"{phase} | {symbol}" + (f"\n{detail}" if detail else "")
         self.update(text)
-        self.notify(text)
+        detail_block = f"\n<pre>{html.escape(detail)}</pre>" if detail else ""
+        self.notify_html(
+            f"<b>{html.escape(phase.upper())}</b>\n<code>{html.escape(symbol)}</code>{detail_block}"
+        )
 
     def _send_file(self, method: str, field: str, path: str | Path, caption: str) -> None:
         source = Path(path)

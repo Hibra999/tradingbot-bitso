@@ -139,7 +139,7 @@ def main() -> int:
                         benchmark=reporting["evaluation_benchmark"],
                     )
                     for split, report in (("training", training_report), ("evaluation", evaluation_report)):
-                        notifier.notify(f"{symbol} | {split}\n{report['text_report']}")
+                        notifier.notify_html(report["telegram_report"])
                         notifier.send_photo(report["graphics"], f"{symbol} {split} backtest graphics")
                         notifier.send_document(report["html"], f"{symbol} {split} QuantStats report")
                         notifier.send_document(report["latex"], f"{symbol} {split} LaTeX tables")

@@ -41,7 +41,13 @@ class ReportTests(unittest.TestCase):
             )
             self.assertIn("RL model", report["text_report"])
             self.assertIn("Buy & Hold", report["text_report"])
+            self.assertIn("<pre>", report["telegram_report"])
+            self.assertIn("B&amp;H", report["telegram_report"])
             self.assertIn("Buy &amp; Hold", report["html"].read_text(encoding="utf-8"))
+            latex = report["latex"].read_text(encoding="utf-8")
+            self.assertIn(r"\documentclass{article}", latex)
+            self.assertIn(r"\resizebox{\textwidth}{!}", latex)
+            self.assertIn(r"Buy \& Hold", latex)
             pd.testing.assert_series_equal(captured["returns"], strategy.rename("RL model"))
             pd.testing.assert_series_equal(captured["benchmark"], benchmark.rename("Buy & Hold"))
 
