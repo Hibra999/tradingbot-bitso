@@ -81,6 +81,13 @@ def _periods_per_year(index: pd.DatetimeIndex) -> int:
     return max(1, round(365 * 24 * 60 * 60 / seconds))
 
 
+def _quantstats_series(series: pd.Series) -> pd.Series:
+    result = series.copy()
+    if result.index.tz is not None:
+        result.index = result.index.tz_convert("UTC").tz_localize(None)
+    return result
+
+
 def _value(value: float, *, percent: bool = False) -> str:
     if not np.isfinite(value):
         return str(value)
@@ -358,9 +365,13 @@ def generate_full_report(
     import quantstats as qs
 
     plt.style.use("default")
+    quantstats_values = _quantstats_series(values)
+    quantstats_benchmark = (
+        _quantstats_series(benchmark_values) if benchmark_values is not None else None
+    )
     qs.reports.html(
-        values,
-        benchmark=benchmark_values,
+        quantstats_values,
+        benchmark=quantstats_benchmark,
         output=str(destination),
         title=title,
         periods_per_year=periods,

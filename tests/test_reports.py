@@ -52,8 +52,11 @@ class ReportTests(unittest.TestCase):
             self.assertIn(r"\resizebox{\textwidth}{!}", latex)
             self.assertIn(r"Buy \& Hold", latex)
             self.assertIn("Alpha", latex)
-            pd.testing.assert_series_equal(captured["returns"], strategy.rename("RL model"))
-            pd.testing.assert_series_equal(captured["benchmark"], benchmark.rename("Buy & Hold"))
+            expected_index = index.tz_convert("UTC").tz_localize(None)
+            pd.testing.assert_index_equal(captured["returns"].index, expected_index)
+            pd.testing.assert_index_equal(captured["benchmark"].index, expected_index)
+            np.testing.assert_array_equal(captured["returns"].to_numpy(), strategy.to_numpy())
+            np.testing.assert_array_equal(captured["benchmark"].to_numpy(), benchmark.to_numpy())
 
 
 if __name__ == "__main__":
