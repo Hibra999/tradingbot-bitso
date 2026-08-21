@@ -19,6 +19,14 @@ def dataframe_hash(frame: pd.DataFrame) -> str:
     return hashlib.sha256(hashed).hexdigest()
 
 
+def file_sha256(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def dependency_versions() -> dict[str, str]:
     result = {}
     for package in _PACKAGES:
@@ -62,16 +70,34 @@ def write_manifest(manifest: dict[str, Any], path: str | Path) -> Path:
     return destination
 
 
-def load_approved_manifest(path: str | Path) -> dict[str, Any]:
+def load_eligible_manifest(path: str | Path) -> dict[str, Any]:
     manifest_path = Path(path).resolve()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != 1 or manifest.get("profile") != "full" or not manifest.get("eligible"):
+    if manifest.get("schema_version") != 2 or manifest.get("profile") != "full" or not manifest.get("eligible"):
         raise PermissionError("manifest schema/profile/gates do not permit live loading")
     selected = manifest.get("selected_artifact")
     declared = set(manifest.get("artifact_paths", []))
     eligible_artifacts = set(manifest.get("eligible_artifacts", []))
     if not selected or selected not in declared or selected not in eligible_artifacts:
         raise PermissionError("an operator must select one declared, gate-eligible artifact")
+    bundle = manifest.get("artifact_bundle")
+    if not isinstance(bundle, dict) or bundle.get("model_path") != selected:
+        raise PermissionError("selected artifact must match the complete champion bundle")
+    model_path = Path(selected).resolve()
+    feature_path = Path(str(bundle.get("feature_pipeline_path", ""))).resolve()
+    hashes = bundle.get("sha256", {})
+    if not isinstance(hashes, dict):
+        raise PermissionError("champion bundle hashes are invalid")
+    if not model_path.is_file() or not feature_path.is_file():
+        raise PermissionError("champion model and feature pipeline must both exist")
+    if hashes.get("model") != file_sha256(model_path) or hashes.get("feature_pipeline") != file_sha256(feature_path):
+        raise PermissionError("champion bundle hash verification failed")
+    return manifest
+
+
+def load_approved_manifest(path: str | Path) -> dict[str, Any]:
+    manifest_path = Path(path).resolve()
+    manifest = load_eligible_manifest(manifest_path)
     if not env_flag("MODEL_APPROVED") or not env_flag("BITSO_LIVE_ENABLED"):
         raise PermissionError("MODEL_APPROVED=true and BITSO_LIVE_ENABLED=true are both required")
     approved_path = os.getenv("APPROVED_MODEL_MANIFEST", "").strip()

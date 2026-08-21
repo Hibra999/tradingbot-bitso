@@ -33,6 +33,16 @@ class EnvironmentTests(unittest.TestCase):
         timestamp = pd.Timestamp("2025-01-01", tz="UTC").to_pydatetime()
         self.assertEqual(sac_intent([0.09, 0.01, 1.5, 2], model_id="m", book="btc_usd", timestamp=timestamp).direction, 0)
         self.assertEqual(sac_intent([-0.5, 0.01, 1.5, 2], model_id="m", book="btc_usd", timestamp=timestamp).direction, -1)
+        self.assertEqual(
+            sac_intent(
+                [-0.5, 0.01, 1.5, 2],
+                model_id="m",
+                book="btc_usd",
+                timestamp=timestamp,
+                allow_short=False,
+            ).direction,
+            0,
+        )
 
     def test_open_position_is_liquidated_at_segment_end(self) -> None:
         decisions = pd.DataFrame(

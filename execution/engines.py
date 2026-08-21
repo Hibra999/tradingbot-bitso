@@ -268,7 +268,13 @@ class LiveExecutionEngine(BaseExecutionEngine):
         unknown_orders = [item for item in open_orders if item.get("oid") not in self.open_order_ids]
         if unknown_orders:
             raise RuntimeError("unmanaged existing orders must be reconciled before startup")
-        if self.approved_manifest.get("schema_version") != 1 or not self.approved_manifest.get("selected_artifact"):
+        bundle = self.approved_manifest.get("artifact_bundle")
+        if (
+            self.approved_manifest.get("schema_version") != 2
+            or not self.approved_manifest.get("selected_artifact")
+            or not isinstance(bundle, dict)
+            or bundle.get("action_contract") != "long_flat_spot"
+        ):
             raise RuntimeError("approved model manifest schema is invalid")
         kill_latched = bool((self.journal.get_state("kill_latch") or {}).get("latched", False))
         self.frozen = self.frozen or kill_latched

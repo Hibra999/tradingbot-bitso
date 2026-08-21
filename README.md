@@ -25,7 +25,7 @@ The safe default is a short, non-promotable verification run:
 .venv/bin/python run_quant_pipeline.py --profile smoke --symbol BTC/USD
 ```
 
-The full profile downloads the complete Alpaca M1 history, runs chronological 36-month train / 6-month validation / 6-month evaluation folds, keeps the newest six complete months sealed, and trains RecurrentPPO, SAC, and CVaR QR-DQN independently for every configured seed. A development-qualified algorithm is retrained before the sealed holdout is evaluated once.
+The full profile downloads the complete Alpaca M1 history, runs chronological 36-month train / 6-month validation / 6-month evaluation folds, keeps the newest six complete months sealed, and trains RecurrentPPO, SAC, TQC, and CVaR QR-DQN independently for every configured seed. A development-qualified algorithm is retrained before the sealed holdout is evaluated once.
 
 ```bash
 .venv/bin/python run_quant_pipeline.py --profile full
@@ -39,7 +39,7 @@ The H1 state includes a causal M1 realized-volatility term structure at 1h, 4h, 
 
 ## Approval and live safety
 
-Full runs may mark artifacts eligible but never select one. An operator must set `selected_artifact` to one path already listed in `eligible_artifacts`, then set:
+Full runs may mark one complete model-plus-feature bundle eligible but never select it. An operator must set `selected_artifact` to the bundle model path already listed in `eligible_artifacts`, then set:
 
 ```text
 MODEL_APPROVED=true
@@ -65,7 +65,7 @@ Set a random `DASHBOARD_TOKEN` of at least 16 characters, then run:
 .venv/bin/python run_live_service.py
 ```
 
-The service coordinates the Bitso L2 stream, paper/live engine, FastAPI dashboard, SQLite journal, and optional Telegram bot in one asyncio loop. It binds to `127.0.0.1:8000` by default. Remote binding must be explicit and all REST calls still require `Authorization: Bearer <DASHBOARD_TOKEN>`; the WebSocket authenticates in its first message.
+The service coordinates the Bitso L2 stream, paper/live engine, approved policy inference, FastAPI dashboard, SQLite journal, and optional Telegram bot in one asyncio loop. It persists close-labelled public Bitso M1 midprice bars, waits for enough causal feature history, decides only on a closed H1 bar, and executes on the following market update. One manifest controls its matching symbol/book; run separate approved services for independently qualified symbols. Feature/hash/action mismatches or excessive standardized feature drift freeze policy execution.
 
 For Telegram, set `TELEGRAM_BOT_TOKEN` and a comma-separated `TELEGRAM_ALLOWED_CHAT_IDS`. Authorized chats receive `/status`, `/balance`, `/backtest`, `/params`, `/set_risk`, and immediate `/kill`; unauthorized chats are ignored.
 

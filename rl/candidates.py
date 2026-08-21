@@ -85,6 +85,31 @@ def build_sac(env: Any, *, seed: int, **overrides: Any):
     return SAC("MlpPolicy", env, **options)
 
 
+def build_tqc(env: Any, *, seed: int, **overrides: Any):
+    _require_pinned_stack()
+    from sb3_contrib import TQC
+
+    batch_size = min(512, max(256, 64 * getattr(env, "num_envs", 1)))
+    options = {
+        "learning_rate": 3e-4,
+        "buffer_size": 100_000,
+        "batch_size": batch_size,
+        "train_freq": (16, "step"),
+        "gradient_steps": 16,
+        "top_quantiles_to_drop_per_net": 2,
+        "policy_kwargs": {
+            "n_critics": 5,
+            "n_quantiles": 25,
+            "optimizer_kwargs": {"foreach": True},
+        },
+        "device": _torch_device(),
+        "seed": seed,
+        "verbose": 0,
+    }
+    options.update(overrides)
+    return TQC("MlpPolicy", env, **options)
+
+
 class RecurrentPolicyRunner:
     def __init__(self, model: Any):
         self.model = model

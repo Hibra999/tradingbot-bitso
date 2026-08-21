@@ -74,13 +74,18 @@ class BitsoConfig:
 
 @dataclass(frozen=True)
 class RLConfig:
-    algorithms: tuple[str, ...] = ("recurrent_ppo", "sac", "cvar_qrdqn")
+    algorithms: tuple[str, ...] = ("recurrent_ppo", "sac", "tqc", "cvar_qrdqn")
     risk_fractions: tuple[float, ...] = (0.005, 0.01, 0.02, 0.03)
     sl_atr_multipliers: tuple[float, ...] = (1.0, 1.5, 2.5, 3.5)
     tp_sl_ratios: tuple[float, ...] = (1.0, 1.5, 2.0, 4.0)
     max_holding_bars: int = 24
     timesteps: dict[str, int] = field(
-        default_factory=lambda: {"recurrent_ppo": 100_000, "sac": 100_000, "cvar_qrdqn": 100_000}
+        default_factory=lambda: {
+            "recurrent_ppo": 100_000,
+            "sac": 100_000,
+            "tqc": 100_000,
+            "cvar_qrdqn": 100_000,
+        }
     )
     evaluations: int = 5
     recurrent_ppo_envs: int = 16
@@ -90,6 +95,7 @@ class RLConfig:
         names = {
             "recurrent_ppo": "RL_RECURRENT_PPO",
             "sac": "RL_SAC",
+            "tqc": "RL_TQC",
             "cvar_qrdqn": "RL_CVAR_QRDQN",
         }
         return cls(

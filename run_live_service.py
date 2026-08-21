@@ -26,6 +26,7 @@ async def serve(args: argparse.Namespace) -> None:
         raise ValueError("dashboard port must be in 1..65535")
 
     import uvicorn
+    import pandas as pd
     from dotenv import load_dotenv
 
     from config import AppConfig, env_flag, required_secret
@@ -37,7 +38,7 @@ async def serve(args: argparse.Namespace) -> None:
         LiveExecutionEngine,
         PaperExecutionEngine,
     )
-    from rl import load_approved_manifest
+    from rl import LivePolicyRuntime, load_approved_manifest, load_eligible_manifest
     from telegram_bot import BacktestManager, TelegramService, parse_allowed_chat_ids
     from ui import DashboardController, create_app
 
@@ -57,6 +58,8 @@ async def serve(args: argparse.Namespace) -> None:
     monitor: asyncio.Task[None] | None = None
     stream_task: asyncio.Task[None] | None = None
     try:
+        manifest_path = os.getenv("APPROVED_MODEL_MANIFEST", "").strip()
+        manifest = None
         if live:
             manifest = load_approved_manifest(required_secret("APPROVED_MODEL_MANIFEST"))
             engine = LiveExecutionEngine(
@@ -75,10 +78,81 @@ async def serve(args: argparse.Namespace) -> None:
                 raise RuntimeError("configured Bitso book is unavailable")
             rules = {book: BookRules.from_payload(payloads[book]) for book in config.bitso.books}
             engine = PaperExecutionEngine(journal, stream.books, rules, risk_params=config.risk)
+            if manifest_path:
+                manifest = load_eligible_manifest(manifest_path)
+
+        policy = LivePolicyRuntime(manifest, config.data_dir / "bitso_live") if manifest else None
+        if policy and policy.book not in stream.books:
+            raise RuntimeError("approved policy book is not configured for this service")
+        if policy and not engine.is_flat:
+            raise RuntimeError("policy inference requires a flat engine at startup")
+        policy_position_age = 0
+        policy_failed = False
+        initial_equity = getattr(engine, "equity", Decimal("0"))
+        if not initial_equity:
+            usd = (journal.get_state("balances") or {}).get("usd", {})
+            initial_equity = Decimal(str(usd.get("available", "0"))) + Decimal(str(usd.get("locked", "0")))
 
         backtests = BacktestManager(Path(__file__).resolve().parent)
         controller = DashboardController({engine.mode: engine}, mode=engine.mode, backtest_runner=backtests.run)
         candles: dict[str, dict[str, Any]] = {}
+
+        async def execute_policy(closed: dict[str, Any], reference_price: Decimal) -> None:
+            nonlocal policy_failed, policy_position_age
+            if policy is None or policy_failed or closed["book"] != policy.book:
+                return
+            try:
+                close_time = pd.Timestamp(closed["time"] + 60, unit="s", tz="UTC")
+                current_equity = getattr(engine, "equity", initial_equity)
+                equity_return = float(current_equity / initial_equity - 1) if initial_equity else 0.0
+                decision = policy.on_closed_m1(
+                    close_time,
+                    closed,
+                    position_direction=engine.position.direction if engine.position else 0,
+                    position_age_bars=policy_position_age,
+                    equity_return=equity_return,
+                )
+                if decision is None:
+                    return
+                state_key = f"policy_decision:{policy.book}"
+                previous = journal.get_state(state_key) or {}
+                if previous.get("decision_time") == str(decision.decision_time):
+                    return
+                journal.set_state(
+                    state_key,
+                    {
+                        "decision_time": str(decision.decision_time),
+                        "direction": decision.intent.direction,
+                        "status": "pending",
+                    },
+                )
+                if isinstance(engine, PaperExecutionEngine):
+                    await engine.execute(decision.intent, decision.atr)
+                else:
+                    await engine.execute(decision.intent, decision.atr, reference_price)
+                policy_position_age = policy_position_age + 1 if engine.position else 0
+                journal.set_state(
+                    state_key,
+                    {
+                        "decision_time": str(decision.decision_time),
+                        "direction": decision.intent.direction,
+                        "status": "executed",
+                    },
+                )
+                journal.append(
+                    "policy_decision",
+                    {
+                        "book": policy.book,
+                        "decision_time": str(decision.decision_time),
+                        "direction": decision.intent.direction,
+                    },
+                )
+            except Exception as exc:
+                policy_failed = True
+                engine.frozen = True
+                engine.persist()
+                journal.append("policy_failure", {"error_type": type(exc).__name__})
+                raise
 
         async def publish_book(book) -> None:
             bids, asks = book.levels("bids"), book.levels("asks")
@@ -88,8 +162,11 @@ async def serve(args: argparse.Namespace) -> None:
             timestamp = int(time.time()) // 60 * 60
             candle = candles.get(book.book)
             if candle is None or candle["time"] != timestamp:
+                closed = candle
                 candle = {"time": timestamp, "open": price, "high": price, "low": price, "close": price, "book": book.book}
                 candles[book.book] = candle
+                if closed is not None:
+                    await execute_policy(closed, Decimal(str(price)))
             else:
                 candle.update(high=max(candle["high"], price), low=min(candle["low"], price), close=price)
             controller.hub.publish("candle", candle)

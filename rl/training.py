@@ -23,9 +23,9 @@ from validation import (
     sharpe_ratio,
 )
 
-from .candidates import RecurrentPolicyRunner, build_cvar_qrdqn, build_recurrent_ppo, build_sac
+from .candidates import RecurrentPolicyRunner, build_cvar_qrdqn, build_recurrent_ppo, build_sac, build_tqc
 from .environment import BracketTradingEnvV2
-from .governance import dataframe_hash, dependency_versions, promotion_gate, write_manifest
+from .governance import dataframe_hash, dependency_versions, file_sha256, promotion_gate, write_manifest
 
 
 def _gpu_postfix() -> dict[str, str]:
@@ -195,7 +195,12 @@ class SB3CandidateRunner:
             frame,
             dataset.m1_bars,
             list(dataset.feature_columns),
-            action_mode={"recurrent_ppo": "ppo", "sac": "sac", "cvar_qrdqn": "qrdqn"}[dataset.algorithm],
+            action_mode={
+                "recurrent_ppo": "ppo",
+                "sac": "sac",
+                "tqc": "sac",
+                "cvar_qrdqn": "qrdqn",
+            }[dataset.algorithm],
             randomize=randomize,
             random_seed=random_seed,
             allow_short=False,
@@ -318,6 +323,7 @@ class SB3CandidateRunner:
         builder = {
             "recurrent_ppo": build_recurrent_ppo,
             "sac": build_sac,
+            "tqc": build_tqc,
             "cvar_qrdqn": build_cvar_qrdqn,
         }[dataset.algorithm]
         model = builder(training_env, seed=dataset.seed)
@@ -577,6 +583,7 @@ class TrainingEngine:
                     evaluation_benchmark = _benchmark_series(result, evaluation, test_segments)
                     training_benchmark = _benchmark_series(result, training, training_segments, training=True)
                     test_sharpe = sharpe_ratio(evaluation.to_numpy()) if len(evaluation) > 1 else float("nan")
+                    artifact_path = str(Path(result.artifact_path).resolve())
                     candidate = {
                         "fold": fold_number,
                         "seed": seed,
@@ -584,7 +591,7 @@ class TrainingEngine:
                         "validation_score": result.validation_score,
                         "test_sharpe": test_sharpe,
                         "stress_return": float(np.prod(1 + stress.to_numpy()) - 1),
-                        "artifact_path": result.artifact_path,
+                        "artifact_path": artifact_path,
                         "feature_manifest": feature_manifest,
                         "evaluation": evaluation,
                         "stress": stress,
@@ -593,7 +600,7 @@ class TrainingEngine:
                         "training_benchmark": training_benchmark,
                     }
                     candidates.append(candidate)
-                    all_artifacts.append(result.artifact_path)
+                    all_artifacts.append(artifact_path)
                     trial_count = max(1, len(result.validation_trials))
                     trial_sharpes.extend([test_sharpe] * trial_count)
                     trial_ledger.append(
@@ -605,7 +612,7 @@ class TrainingEngine:
                             "validation_scores": list(result.validation_trials) or [result.validation_score],
                             "evaluation_sharpe": test_sharpe,
                             "stress_return": candidate["stress_return"],
-                            "artifact_path": result.artifact_path,
+                            "artifact_path": artifact_path,
                         }
                     )
                     update = getattr(self.notifier, "update", None)
@@ -868,23 +875,24 @@ class TrainingEngine:
                     )
                     evaluation_benchmark = _benchmark_series(result, evaluation, dataset.test_segments)
                     test_sharpe = sharpe_ratio(evaluation.to_numpy())
+                    artifact_path = str(Path(result.artifact_path).resolve())
                     final_candidates.append(
                         {
                             "seed": seed,
                             "validation_score": result.validation_score,
                             "test_sharpe": test_sharpe,
                             "stress_return": float(np.prod(1 + stress.to_numpy()) - 1),
-                            "artifact_path": result.artifact_path,
+                            "artifact_path": artifact_path,
                             "training": training,
                             "evaluation": evaluation,
                             "stress": stress,
                             "training_benchmark": training_benchmark,
                             "evaluation_benchmark": evaluation_benchmark,
                             "feature_manifest": final_pipeline.manifest(),
-                            "feature_artifact_path": str(feature_path),
+                            "feature_artifact_path": str(feature_path.resolve()),
                         }
                     )
-                    all_artifacts.append(result.artifact_path)
+                    all_artifacts.append(artifact_path)
                     checkpoint_trials = max(1, len(result.validation_trials))
                     trial_sharpes.extend([test_sharpe] * checkpoint_trials)
                     trial_ledger.append(
@@ -896,7 +904,7 @@ class TrainingEngine:
                             "validation_scores": list(result.validation_trials) or [result.validation_score],
                             "evaluation_sharpe": test_sharpe,
                             "stress_return": float(np.prod(1 + stress.to_numpy()) - 1),
-                            "artifact_path": result.artifact_path,
+                            "artifact_path": artifact_path,
                         }
                     )
                 report_candidate = max(
@@ -948,7 +956,7 @@ class TrainingEngine:
                     "algorithm": champion_algorithm,
                     "selected_seed": report_candidate["seed"],
                     "selected_artifact": report_candidate["artifact_path"],
-                    "feature_artifact_path": str(feature_path),
+                    "feature_artifact_path": str(feature_path.resolve()),
                     "training_range": [
                         str(report_candidate["training"].index.min()),
                         str(report_candidate["training"].index.max()),
@@ -986,8 +994,30 @@ class TrainingEngine:
             if self.config.profile == "full"
             else ["no algorithm passed every promotion gate"]
         )
+        artifact_bundle: dict[str, object] | None = None
+        if final_evaluation is not None:
+            model_path = Path(str(report_candidate["artifact_path"])).resolve()
+            feature_artifact = Path(str(report_candidate["feature_artifact_path"])).resolve()
+            artifact_bundle = {
+                "model_path": str(model_path),
+                "feature_pipeline_path": str(feature_artifact),
+                "algorithm": report_candidate["algorithm"],
+                "symbol": symbol,
+                "book": symbol.lower().replace("/", "_"),
+                "feature_order": list(report_candidate["feature_manifest"]["feature_order"]),
+                "action_contract": "long_flat_spot",
+                "decision_frequency": "1h",
+                "execution_delay": "next_m1_tick",
+                "feature_z_limit": 10.0,
+                "commission_bps": self.config.validation.commission_bps,
+                "base_spread_bps": self.config.validation.base_spread_bps,
+                "sha256": {
+                    "model": file_sha256(model_path),
+                    "feature_pipeline": file_sha256(feature_artifact),
+                },
+            }
         manifest: dict[str, object] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "model_id": f"{symbol.replace('/', '_')}-{self._git_sha()[:12]}",
             "symbol": symbol,
             "profile": self.config.profile,
@@ -1019,6 +1049,7 @@ class TrainingEngine:
                 ),
             },
             "final_evaluation": final_evaluation,
+            "artifact_bundle": artifact_bundle,
             "report_candidate": {
                 "algorithm": report_candidate["algorithm"],
                 "fold": report_candidate["fold"],

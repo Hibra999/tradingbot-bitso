@@ -166,7 +166,15 @@ class ExecutionEngineTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as folder:
             journal = ExecutionJournal(Path(folder) / "journal.sqlite3")
             rest = _RaceREST()
-            engine = LiveExecutionEngine(journal, rest, {"schema_version": 1, "selected_artifact": "model"})
+            engine = LiveExecutionEngine(
+                journal,
+                rest,
+                {
+                    "schema_version": 2,
+                    "selected_artifact": "model",
+                    "artifact_bundle": {"action_contract": "long_flat_spot"},
+                },
+            )
             engine.enabled = True
             engine.position = TrackedPosition(
                 "btc_usd",
@@ -193,7 +201,15 @@ class ExecutionEngineTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as folder:
             journal = ExecutionJournal(Path(folder) / "journal.sqlite3")
             rest = _PartialExitREST()
-            engine = LiveExecutionEngine(journal, rest, {"schema_version": 1, "selected_artifact": "model"})
+            engine = LiveExecutionEngine(
+                journal,
+                rest,
+                {
+                    "schema_version": 2,
+                    "selected_artifact": "model",
+                    "artifact_bundle": {"action_contract": "long_flat_spot"},
+                },
+            )
             engine.enabled = True
             engine.rules = {"btc_usd": _rules()}
             engine.position = TrackedPosition(
@@ -216,7 +232,11 @@ class ExecutionEngineTests(unittest.IsolatedAsyncioTestCase):
             engine = LiveExecutionEngine(
                 journal,
                 _PreflightREST(),
-                {"schema_version": 1, "selected_artifact": "model"},
+                {
+                    "schema_version": 2,
+                    "selected_artifact": "model",
+                    "artifact_bundle": {"action_contract": "long_flat_spot"},
+                },
             )
             await engine.preflight(("btc_usd",))
             self.assertTrue(engine.frozen)

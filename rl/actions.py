@@ -63,11 +63,13 @@ def ppo_intent(
     timestamp: datetime,
     distribution: tuple[float, ...] = (),
     config: RLConfig | None = None,
+    allow_short: bool = True,
 ) -> TradeIntent:
     cfg = config or RLConfig()
     direction_index, sl_index, tp_index = (int(value) for value in action)
-    if direction_index not in (0, 1, 2):
-        raise ValueError("PPO direction must be 0=flat, 1=long, or 2=short")
+    allowed = (0, 1, 2) if allow_short else (0, 1)
+    if direction_index not in allowed:
+        raise ValueError("PPO direction is unavailable for the configured action contract")
     direction = (0, 1, -1)[direction_index]
     confidence = max(distribution) if distribution else 1.0
     return _intent(
@@ -89,9 +91,12 @@ def sac_intent(
     model_id: str,
     book: str,
     timestamp: datetime,
+    allow_short: bool = True,
 ) -> TradeIntent:
     direction_score, risk, sl, tp = _sac_action_values(action)
     direction = 0 if abs(direction_score) < 0.1 else int(np.sign(direction_score))
+    if not allow_short and direction < 0:
+        direction = 0
     derived = (max(-direction_score, 0), max(1 - abs(direction_score), 0), max(direction_score, 0))
     return _intent(
         direction,
@@ -151,8 +156,9 @@ def qrdqn_intent(
     timestamp: datetime,
     scores: tuple[float, ...] = (),
     config: RLConfig | None = None,
+    allow_short: bool = True,
 ) -> TradeIntent:
-    direction, risk, sl, tp = qrdqn_action_table(config)[int(action)]
+    direction, risk, sl, tp = qrdqn_action_table(config, allow_short=allow_short)[int(action)]
     confidence = max(scores) if scores else 1.0
     return _intent(
         direction,

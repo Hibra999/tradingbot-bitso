@@ -10,7 +10,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-from rl import internal_purged_validation_tail, load_approved_manifest, promotion_gate
+from rl import file_sha256, internal_purged_validation_tail, load_approved_manifest, promotion_gate
 
 
 class GovernanceTests(unittest.TestCase):
@@ -37,16 +37,29 @@ class GovernanceTests(unittest.TestCase):
         self.assertTrue(promotion_gate(metrics, profile="full")[0])
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "manifest.json"
-            artifact = str(Path(folder) / "model.zip")
+            artifact_path = Path(folder) / "model.zip"
+            feature_path = Path(folder) / "features.pkl"
+            artifact_path.write_bytes(b"model")
+            feature_path.write_bytes(b"features")
+            artifact = str(artifact_path)
             path.write_text(
                 json.dumps(
                     {
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "profile": "full",
                         "eligible": True,
                         "selected_artifact": artifact,
                         "artifact_paths": [artifact],
                         "eligible_artifacts": [artifact],
+                        "artifact_bundle": {
+                            "model_path": artifact,
+                            "feature_pipeline_path": str(feature_path),
+                            "action_contract": "long_flat_spot",
+                            "sha256": {
+                                "model": file_sha256(artifact_path),
+                                "feature_pipeline": file_sha256(feature_path),
+                            },
+                        },
                     }
                 )
             )
