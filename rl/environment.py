@@ -10,7 +10,7 @@ from gymnasium import spaces
 from config import RLConfig
 from validation import DomainRandomizer
 
-from .actions import qrdqn_action_table
+from .actions import _sac_action_values, qrdqn_action_table
 from .execution_core import BracketExecutionCore
 
 
@@ -93,9 +93,7 @@ class BracketTradingEnvV2(gym.Env):
             direction, risk = (0, 1, -1)[direction_index], self._risk_fraction
             sl, tp = self._sl_atr_multipliers[sl_index], self._tp_sl_ratios[tp_index]
         elif self.action_mode == "sac":
-            direction_score, risk, sl, tp = (float(value) for value in action)
-            if not (-1 <= direction_score <= 1 and 0.005 <= risk <= 0.03 and 1 <= sl <= 3.5 and 1 <= tp <= 4):
-                raise ValueError("SAC action is outside its declared Box")
+            direction_score, risk, sl, tp = _sac_action_values(action)
             direction = 0 if abs(direction_score) < 0.1 else (1 if direction_score > 0 else -1)
         else:
             direction, risk, sl, tp = self._qrdqn_actions[int(action)]

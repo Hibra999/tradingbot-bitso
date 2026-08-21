@@ -9,6 +9,26 @@ import numpy as np
 from config import RLConfig
 from execution import TradeIntent
 
+_SAC_LOW = (-1.0, float(np.float32(0.005)), 1.0, 1.0)
+_SAC_HIGH = (1.0, 0.03, 3.5, 4.0)
+
+
+def _sac_action_values(action: np.ndarray | list[float] | tuple[float, float, float, float]) -> tuple[float, ...]:
+    direction, risk, stop, target = (float(value) for value in action)
+    if not (
+        _SAC_LOW[0] <= direction <= _SAC_HIGH[0]
+        and _SAC_LOW[1] <= risk <= _SAC_HIGH[1]
+        and _SAC_LOW[2] <= stop <= _SAC_HIGH[2]
+        and _SAC_LOW[3] <= target <= _SAC_HIGH[3]
+    ):
+        raise ValueError("SAC action is outside its declared Box")
+    return (
+        min(1.0, max(-1.0, direction)),
+        min(0.03, max(0.005, risk)),
+        min(3.5, max(1.0, stop)),
+        min(4.0, max(1.0, target)),
+    )
+
 
 def _intent(
     direction: int,
@@ -70,9 +90,7 @@ def sac_intent(
     book: str,
     timestamp: datetime,
 ) -> TradeIntent:
-    direction_score, risk, sl, tp = (float(value) for value in action)
-    if not (-1 <= direction_score <= 1 and 0.005 <= risk <= 0.03 and 1 <= sl <= 3.5 and 1 <= tp <= 4):
-        raise ValueError("SAC action is outside its declared Box")
+    direction_score, risk, sl, tp = _sac_action_values(action)
     direction = 0 if abs(direction_score) < 0.1 else int(np.sign(direction_score))
     derived = (max(-direction_score, 0), max(1 - abs(direction_score), 0), max(direction_score, 0))
     return _intent(
