@@ -70,6 +70,11 @@ def _contiguous(indices: np.ndarray) -> tuple[np.ndarray, ...]:
     return tuple(part for part in np.split(ordered, np.flatnonzero(np.diff(ordered) > 1) + 1) if len(part))
 
 
+def _attach_scaled_features(raw: pd.DataFrame, features: pd.DataFrame) -> pd.DataFrame:
+    aligned = raw.loc[features.index]
+    return aligned.drop(columns=features.columns, errors="ignore").join(features)
+
+
 @dataclass(frozen=True)
 class CandidateDataset:
     symbol: str
@@ -509,7 +514,7 @@ class TrainingEngine:
                 raw = decision_data.iloc[indices]
                 prior = history_indices[history_indices < indices.min()]
                 features = pipeline.transform(raw, history_context=decision_data.iloc[prior])
-                return raw.loc[features.index].join(features)
+                return _attach_scaled_features(raw, features)
 
             prepared.append(
                 (
@@ -847,7 +852,7 @@ class TrainingEngine:
                     raw = decision_data.iloc[indices]
                     prior = history_indices[history_indices < indices.min()]
                     features = final_pipeline.transform(raw, history_context=decision_data.iloc[prior])
-                    return raw.loc[features.index].join(features)
+                    return _attach_scaled_features(raw, features)
 
                 final_training = final_transformed(final_train_indices, final_train_indices)
                 final_validation = final_transformed(final_validation_indices, final_train_indices)
