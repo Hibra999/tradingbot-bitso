@@ -16,5 +16,6 @@ scikit-learn==1.9.0
 scipy==1.17.1
 stable-baselines3==2.9.0
 statsmodels==0.14.6
+tqdm==4.70.0
 uvicorn==0.52.4
 websockets==17.0.1

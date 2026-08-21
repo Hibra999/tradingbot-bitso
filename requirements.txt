@@ -208,6 +208,8 @@ threadpoolctl==3.6.0
     # via scikit-learn
 torch==2.13.0
     # via stable-baselines3
+tqdm==4.70.0
+    # via -r requirements.in
 triton==3.7.1
     # via torch
 typing-extensions==4.16.0

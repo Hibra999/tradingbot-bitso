@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 from config import AppConfig
 from quant import CausalFeaturePipeline, atr
@@ -21,6 +23,18 @@ from validation import (
 from .candidates import RecurrentPolicyRunner, build_cvar_qrdqn, build_recurrent_ppo, build_sac
 from .environment import BracketTradingEnvV2
 from .governance import dataframe_hash, dependency_versions, promotion_gate, write_manifest
+
+
+def _gpu_postfix() -> dict[str, str]:
+    try:
+        import torch
+    except ModuleNotFoundError:
+        return {}
+    if not torch.cuda.is_available():
+        return {}
+    gib = 1024**3
+    allocated, reserved = torch.cuda.memory_allocated() / gib, torch.cuda.memory_reserved() / gib
+    return {"GPU memory": f"{allocated:.1f}/{reserved:.1f}GiB"}
 
 
 def internal_purged_validation_tail(
@@ -97,24 +111,74 @@ class SB3CandidateRunner:
             randomize=True,
         )
 
-    @staticmethod
-    def _evaluate(model, dataset: CandidateDataset, segments: tuple[pd.DataFrame, ...]) -> tuple[float, ...]:
+    def _evaluate(self, model, dataset: CandidateDataset, segments: tuple[pd.DataFrame, ...]) -> tuple[float, ...]:
         returns: list[float] = []
-        for segment in segments:
-            environment = SB3CandidateRunner._environment(dataset, segment)
+        for number, segment in enumerate(segments, 1):
+            environment = self._environment(dataset, segment)
             observation, _ = environment.reset(seed=dataset.seed)
             recurrent = RecurrentPolicyRunner(model) if dataset.algorithm == "recurrent_ppo" else None
             done, previous_equity = False, environment.core.equity
-            while not done:
-                action = recurrent.predict(observation) if recurrent else model.predict(observation, deterministic=True)[0]
-                observation, _, done, _, info = environment.step(action)
-                equity = float(info["equity"])
-                returns.append(equity / previous_equity - 1)
-                previous_equity = equity
+            started, last = time.monotonic(), 0.0
+            status = (
+                f"{dataset.symbol} | {dataset.algorithm} | fold {dataset.fold + 1} | "
+                f"seed {dataset.seed} | evaluation segment {number}/{len(segments)}"
+            )
+            with tqdm(
+                total=max(len(segment) - 1, 0),
+                desc=f"Evaluation {number}/{len(segments)}",
+                leave=False,
+                dynamic_ncols=True,
+                mininterval=0.5,
+            ) as progress:
+                while not done:
+                    action = recurrent.predict(observation) if recurrent else model.predict(observation, deterministic=True)[0]
+                    observation, _, done, _, info = environment.step(action)
+                    equity = float(info["equity"])
+                    returns.append(equity / previous_equity - 1)
+                    previous_equity = equity
+                    progress.update()
+                    now = time.monotonic()
+                    if now - last >= 1.0:
+                        publish = getattr(self.notifier, "progress", None)
+                        if publish:
+                            publish(status, int(progress.n), int(progress.total), started)
+                        last = now
+                publish = getattr(self.notifier, "progress", None)
+                if publish and progress.total:
+                    publish(status, int(progress.n), int(progress.total), started)
         return tuple(returns)
 
     def __call__(self, dataset: CandidateDataset) -> CandidateRun:
+        from stable_baselines3.common.callbacks import BaseCallback
         from stable_baselines3.common.vec_env import DummyVecEnv
+
+        notifier = self.notifier
+
+        class ProgressCallback(BaseCallback):
+            def __init__(self, bar, offset: int, steps: int, label: str, started: float):
+                super().__init__(verbose=0)
+                self.bar, self.offset, self.steps = bar, offset, steps
+                self.label, self.started, self.base, self.last = label, started, 0, 0.0
+
+            def _on_training_start(self) -> None:
+                self.base = self.model.num_timesteps
+
+            def _on_step(self) -> bool:
+                current = self.offset + min(self.steps, max(self.model.num_timesteps - self.base, 0))
+                if self.n_calls % 128 and current < self.offset + self.steps:
+                    return True
+                if current > self.bar.n:
+                    self.bar.update(current - self.bar.n)
+                now = time.monotonic()
+                if now - self.last >= 1.0:
+                    publish = getattr(notifier, "progress", None)
+                    update = getattr(notifier, "update", None)
+                    if publish:
+                        publish(self.label, int(self.bar.n), int(self.bar.total), self.started)
+                    elif update:
+                        update(f"{self.label} | {int(self.bar.n):,}/{int(self.bar.total):,}")
+                    self.last = now
+                return True
 
         factories = [lambda frame=frame: self._environment(dataset, frame) for frame in dataset.training_segments]
         training_env = DummyVecEnv(factories)
@@ -126,23 +190,45 @@ class SB3CandidateRunner:
         model = builder(training_env, seed=dataset.seed)
         total = self.timesteps.get(dataset.algorithm, 100_000) if isinstance(self.timesteps, dict) else self.timesteps
         chunk, remainder = divmod(total, self.evaluations)
+        steps_by_evaluation = tuple(max(1, chunk + (evaluation < remainder)) for evaluation in range(self.evaluations))
         best_score = float("-inf")
         artifact = dataset.output_dir / "best_model"
-        for evaluation in range(self.evaluations):
-            steps = max(1, chunk + (evaluation < remainder))
-            update = getattr(self.notifier, "update", None)
-            if update:
-                update(
-                    f"{dataset.symbol} | {dataset.algorithm} | fold {dataset.fold + 1} | "
-                    f"seed {dataset.seed} | evaluation {evaluation + 1}/{self.evaluations}"
+        label = f"{dataset.symbol} | {dataset.algorithm} | fold {dataset.fold + 1} | seed {dataset.seed}"
+        started = time.monotonic()
+        with tqdm(
+            total=sum(steps_by_evaluation),
+            desc=f"{dataset.symbol} {dataset.algorithm} f{dataset.fold + 1} s{dataset.seed}",
+            leave=False,
+            dynamic_ncols=True,
+            mininterval=0.5,
+        ) as progress:
+            for evaluation, steps in enumerate(steps_by_evaluation, 1):
+                status = f"{label} | evaluation {evaluation}/{self.evaluations}"
+                offset = int(progress.n)
+                model.learn(
+                    steps,
+                    reset_num_timesteps=False,
+                    callback=ProgressCallback(progress, offset, steps, status, started),
                 )
-            model.learn(steps, reset_num_timesteps=False)
-            validation_returns = self._evaluate(model, dataset, (dataset.validation_segment,))
-            score = float(np.prod(1 + np.asarray(validation_returns)) - 1)
-            if evaluation == 0 or np.isfinite(score) and (not np.isfinite(best_score) or score > best_score):
-                best_score = score
-                model.save(artifact)
+                target = offset + steps
+                if target > progress.n:
+                    progress.update(target - progress.n)
+                publish = getattr(notifier, "progress", None)
+                if publish:
+                    publish(status, int(progress.n), int(progress.total), started)
+                update = getattr(notifier, "update", None)
+                if update:
+                    update(f"{status} | validation")
+                validation_returns = self._evaluate(model, dataset, (dataset.validation_segment,))
+                score = float(np.prod(1 + np.asarray(validation_returns)) - 1)
+                if evaluation == 1 or np.isfinite(score) and (not np.isfinite(best_score) or score > best_score):
+                    best_score = score
+                    model.save(artifact)
+                progress.set_postfix(evaluation=f"{evaluation}/{self.evaluations}", best=f"{best_score:.4f}", **_gpu_postfix())
         model = model.__class__.load(artifact, env=training_env)
+        update = getattr(notifier, "update", None)
+        if update:
+            update(f"{label} | test evaluation")
         test_returns = self._evaluate(model, dataset, dataset.test_segments)
         return CandidateRun(test_returns, str(artifact.with_suffix(".zip")), best_score)
 
@@ -183,7 +269,14 @@ class TrainingEngine:
         eligible_artifacts: list[str] = []
         all_prior = np.arange(len(decision_data))
         prepared = []
-        for fold_number, fold in enumerate(folds):
+        preparation_started = time.monotonic()
+        for fold_number, fold in tqdm(
+            enumerate(folds),
+            total=len(folds),
+            desc=f"{symbol} feature preparation",
+            leave=False,
+            dynamic_ncols=True,
+        ):
             update = getattr(self.notifier, "update", None)
             if update:
                 update(f"{symbol} | feature preparation | fold {fold_number + 1}/{len(folds)}")
@@ -213,12 +306,31 @@ class TrainingEngine:
                     pipeline.manifest(),
                 )
             )
+            progress = getattr(self.notifier, "progress", None)
+            if progress:
+                progress(
+                    f"{symbol} | feature preparation | fold {fold_number + 1}/{len(folds)}",
+                    fold_number + 1,
+                    len(folds),
+                    preparation_started,
+                )
 
-        for algorithm in self.config.rl.algorithms:
+        for algorithm in tqdm(
+            self.config.rl.algorithms,
+            desc=f"{symbol} algorithms",
+            leave=False,
+            dynamic_ncols=True,
+        ):
             runs: list[dict[str, object]] = []
             algorithm_artifacts: list[str] = []
             returns_by_seed: dict[int, list[float]] = {seed: [] for seed in seeds}
             feature_manifests = [item[-1] for item in prepared]
+            jobs = tqdm(
+                total=len(prepared) * len(seeds),
+                desc=f"{algorithm} fold/seed jobs",
+                leave=False,
+                dynamic_ncols=True,
+            )
             for (
                 fold_number,
                 fold,
@@ -229,6 +341,7 @@ class TrainingEngine:
                 _,
             ) in prepared:
                 for seed in seeds:
+                    jobs.set_postfix(fold=f"{fold_number + 1}/{len(folds)}", seed=seed)
                     output_dir = self.config.models_dir / symbol.replace("/", "_") / algorithm / f"fold_{fold_number}" / f"seed_{seed}"
                     dataset = CandidateDataset(
                         symbol,
@@ -263,6 +376,8 @@ class TrainingEngine:
                             "artifact_path": result.artifact_path,
                         }
                     )
+                    jobs.update()
+            jobs.close()
 
             seed_sharpes = [sharpe_ratio(values) for values in returns_by_seed.values()]
             combined = np.concatenate([np.asarray(values) for values in returns_by_seed.values()])

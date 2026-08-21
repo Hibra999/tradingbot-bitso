@@ -18,7 +18,7 @@ def _parse_chat_ids(value: str) -> tuple[int, ...]:
 class PipelineNotifier:
     BASE_URL = "https://api.telegram.org/bot{token}"
 
-    def __init__(self, *, min_interval: float = 0.05, update_interval: float = 60.0) -> None:
+    def __init__(self, *, min_interval: float = 0.05, update_interval: float = 10.0) -> None:
         token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
         self._chat_ids = _parse_chat_ids(os.getenv("TELEGRAM_ALLOWED_CHAT_IDS", ""))
         self._client = httpx.Client(timeout=15.0) if token and self._chat_ids else None
@@ -85,6 +85,15 @@ class PipelineNotifier:
     def update(self, status: str) -> None:
         with self._state_lock:
             self._status = status
+
+    def progress(self, status: str, current: int, total: int, started: float) -> None:
+        elapsed = max(time.monotonic() - started, 1e-9)
+        rate = current / elapsed
+        eta = max(total - current, 0) / rate if rate else 0.0
+        self.update(
+            f"{status}\nProgress: {current:,}/{total:,} ({current / total:.1%}) | "
+            f"{rate:,.1f} it/s | ETA: {eta:.0f}s"
+        )
 
     def _update_loop(self) -> None:
         while not self._stop.wait(self._update_interval):

@@ -21,6 +21,8 @@ def main() -> int:
         raise RuntimeError("Python 3.11 or newer is required")
 
     import numpy as np
+    from dotenv import load_dotenv
+    from tqdm import tqdm
 
     from config import AppConfig
     from data import load_alpaca_ohlcv, resample_ohlcv
@@ -29,10 +31,12 @@ def main() -> int:
     from telegram_bot.reports import generate_full_report
     from validation import moving_block_monte_carlo
 
+    load_dotenv(override=False)
     config = AppConfig.from_env(profile=args.profile)
     if args.cache_only is not None:
         config = replace(config, cache_only=args.cache_only)
     notifier = PipelineNotifier()
+    tqdm.write(f"Telegram progress: {'ON' if notifier.enabled else 'OFF'}")
 
     class SmokeRunner:
         def __call__(self, dataset) -> CandidateRun:
@@ -54,55 +58,72 @@ def main() -> int:
     started = time.monotonic()
     notifier.start_updates(f"Pipeline starting | {args.profile} | {', '.join(symbols)}")
     try:
-        for symbol in symbols:
-            notifier.notify_phase("Data loading", symbol, f"cache_only={config.cache_only}")
-            m1 = load_alpaca_ohlcv(
-                symbol,
-                "1min",
-                max_days_for_demo=None if args.profile == "full" else 60,
-                cache_dir=config.data_dir,
-                timestamp_is_bar_open=False,
-                cache_only=config.cache_only,
-            )
-            notifier.notify_phase("Resampling", symbol, f"{len(m1)} M1 bars")
-            decision = resample_ohlcv(m1, "1h")
-            notifier.notify_phase("Training", symbol, f"{len(decision)} H1 bars")
-            manifest = TrainingEngine(config, runner=runner, notifier=notifier).run_symbol(symbol, decision, m1)
-            observed_returns = decision["Close"].pct_change().dropna()
-            notifier.notify_phase("Monte Carlo", symbol, f"{config.validation.monte_carlo_paths} paths")
-            monte_carlo = moving_block_monte_carlo(
-                observed_returns.to_numpy(),
-                paths=config.validation.monte_carlo_paths,
-                block_size=min(24, len(observed_returns)),
-            )
-            destination = config.outputs_dir / f"{symbol.replace('/', '_')}_report.html"
-            notifier.notify_phase("Reporting", symbol)
-            report = generate_full_report(
-                observed_returns,
-                monte_carlo,
-                destination,
-                title=f"{symbol} {args.profile.title()} Backtest",
-                symbol=symbol,
-            )
-            notifier.notify(report["text_report"])
-            notifier.send_photo(report["graphics"], f"{symbol} backtest graphics")
-            notifier.send_document(report["html"], f"{symbol} full QuantStats report")
-            notifier.send_document(report["latex"], f"{symbol} LaTeX tables")
-            print(
-                json.dumps(
-                    {
-                        "symbol": symbol,
-                        "profile": args.profile,
-                        "eligible": manifest["eligible"],
-                        "report": str(report["html"]),
-                        "advanced_metrics": report["metrics"],
-                    },
-                    sort_keys=True,
+        with tqdm(symbols, desc=f"Pipeline {args.profile}", unit="symbol", dynamic_ncols=True) as symbol_bar:
+            for symbol in symbol_bar:
+                symbol_bar.set_postfix_str(symbol)
+                with tqdm(total=5, desc=f"{symbol} phases", leave=False, dynamic_ncols=True) as phase_bar:
+                    phase_bar.set_postfix_str("data loading")
+                    notifier.notify_phase("Data loading", symbol, f"cache_only={config.cache_only}")
+                    m1 = load_alpaca_ohlcv(
+                        symbol,
+                        "1min",
+                        max_days_for_demo=None if args.profile == "full" else 60,
+                        cache_dir=config.data_dir,
+                        timestamp_is_bar_open=False,
+                        cache_only=config.cache_only,
+                    )
+                    phase_bar.update()
+                    phase_bar.set_postfix_str("resampling")
+                    notifier.notify_phase("Resampling", symbol, f"{len(m1):,} M1 bars")
+                    decision = resample_ohlcv(m1, "1h")
+                    phase_bar.update()
+                    phase_bar.set_postfix_str("training")
+                    notifier.notify_phase("Training", symbol, f"{len(decision):,} H1 bars")
+                    manifest = TrainingEngine(config, runner=runner, notifier=notifier).run_symbol(symbol, decision, m1)
+                    phase_bar.update()
+                    observed_returns = decision["Close"].pct_change().dropna()
+                    phase_bar.set_postfix_str("monte carlo")
+                    notifier.notify_phase("Monte Carlo", symbol, f"{config.validation.monte_carlo_paths:,} paths")
+                    monte_carlo = moving_block_monte_carlo(
+                        observed_returns.to_numpy(),
+                        paths=config.validation.monte_carlo_paths,
+                        block_size=min(24, len(observed_returns)),
+                    )
+                    phase_bar.update()
+                    destination = config.outputs_dir / f"{symbol.replace('/', '_')}_report.html"
+                    phase_bar.set_postfix_str("reporting")
+                    notifier.notify_phase("Reporting", symbol)
+                    report = generate_full_report(
+                        observed_returns,
+                        monte_carlo,
+                        destination,
+                        title=f"{symbol} {args.profile.title()} Backtest",
+                        symbol=symbol,
+                    )
+                    notifier.notify(report["text_report"])
+                    notifier.send_photo(report["graphics"], f"{symbol} backtest graphics")
+                    notifier.send_document(report["html"], f"{symbol} full QuantStats report")
+                    notifier.send_document(report["latex"], f"{symbol} LaTeX tables")
+                    phase_bar.update()
+                print(
+                    json.dumps(
+                        {
+                            "symbol": symbol,
+                            "profile": args.profile,
+                            "eligible": manifest["eligible"],
+                            "report": str(report["html"]),
+                            "advanced_metrics": report["metrics"],
+                        },
+                        sort_keys=True,
+                    )
                 )
-            )
-        notifier.stop_updates(f"Pipeline complete | {time.monotonic() - started:.1f}s")
+        elapsed = time.monotonic() - started
+        tqdm.write(f"Pipeline complete | {elapsed:.1f}s")
+        notifier.stop_updates(f"Pipeline complete | {elapsed:.1f}s")
     except Exception:
-        notifier.stop_updates(f"Pipeline failed | {time.monotonic() - started:.1f}s")
+        elapsed = time.monotonic() - started
+        tqdm.write(f"Pipeline failed | {elapsed:.1f}s")
+        notifier.stop_updates(f"Pipeline failed | {elapsed:.1f}s")
         raise
     finally:
         notifier.close()
