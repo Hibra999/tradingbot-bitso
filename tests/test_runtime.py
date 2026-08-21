@@ -50,7 +50,7 @@ class RuntimeTests(unittest.TestCase):
             "model_id": "btc-model",
             "artifact_bundle": {
                 "action_contract": "target_exposure_long_cash_v1",
-                "market_context": "binance_public_v1",
+                "market_context": "none",
                 "algorithm": "sac",
                 "book": "btc_usd",
                 "model_path": "model.zip",

@@ -1,6 +1,6 @@
 # tradingbot-bitso
 
-A causal, signal-first reinforcement-learning research and Bitso execution platform for `BTC/USD` and `ETH/USD`. Alpaca supplies target-venue research bars, free Binance spot/futures/funding data supplies causal market context, and deployment orders use matching Bitso `btc_usd` and `eth_usd` books.
+A causal, signal-first reinforcement-learning research and Bitso execution platform for `BTC/USD` and `ETH/USD`. Alpaca supplies target-venue research bars, optional free Binance spot/futures/funding data supplies causal market context, and deployment orders use matching Bitso `btc_usd` and `eth_usd` books.
 
 The system defaults to a non-promotable smoke profile and paper execution. It does not promise profitability: failed statistical or risk gates produce reports and block live loading.
 
@@ -25,7 +25,7 @@ The safe default is a short, non-promotable verification run:
 .venv/bin/python run_quant_pipeline.py --profile smoke --symbol BTC/USD
 ```
 
-The first run after this schema upgrade must populate and validate the public Binance context cache and migrate legacy Alpaca crypto timestamps exactly once:
+To enable the optional public Binance context, set `BINANCE_CONTEXT_ENABLED=true`. Its separate cache must then be populated once alongside any legacy Alpaca timestamp migration:
 
 ```bash
 .venv/bin/python run_quant_pipeline.py --profile smoke --symbol BTC/USD --no-cache-only
@@ -39,7 +39,7 @@ The full profile uses chronological 36-month train / 6-month validation / 6-mont
 
 Full training and runtime validation belong on the external high-resource machine. This VPS is for static inspection only.
 
-The first full run must also use `--no-cache-only` so Binance context is backfilled for the complete research window; later runs can return to the cache-only default.
+When Binance context is enabled, its first full run must use `--no-cache-only` to backfill the complete research window; later runs can return to the cache-only default. With the default disabled, existing Alpaca-only caches require no Binance download.
 
 Research outputs include per-symbol manifests plus separate training and evaluation QuantStats reports. Both reports compare RL with cost-adjusted buy-and-hold and deterministic alpha; evaluation also includes volatility-matched buy-and-hold. A smoke manifest can never pass promotion.
 

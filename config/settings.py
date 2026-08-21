@@ -214,6 +214,7 @@ class AppConfig:
     rl: RLConfig = field(default_factory=RLConfig)
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     risk: RuntimeRiskParams = field(default_factory=RuntimeRiskParams)
+    binance_context_enabled: bool = False
 
     def __post_init__(self) -> None:
         if self.profile not in {"smoke", "full"}:
@@ -243,6 +244,7 @@ class AppConfig:
             paper_mode=not live,
             allow_margin_shorts=env_flag("BITSO_MARGIN_SHORTS_ENABLED"),
             cache_only=env_flag("CACHE_ONLY", True),
+            binance_context_enabled=env_flag("BINANCE_CONTEXT_ENABLED", False),
             rl=RLConfig.from_env(),
             validation=ValidationConfig.from_env(),
         )

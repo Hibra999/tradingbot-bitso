@@ -1501,7 +1501,11 @@ class TrainingEngine:
                 "feature_order": list(report_candidate["feature_manifest"]["feature_order"]),
                 "action_contract": "target_exposure_long_cash_v1",
                 "observation_schema": "alpha_risk_state_v1",
-                "market_context": "binance_public_v1",
+                "market_context": (
+                    "binance_public_v1"
+                    if any(str(column).startswith("ctx_") for column in report_candidate["feature_manifest"]["feature_order"])
+                    else "none"
+                ),
                 "decision_frequency": "1h",
                 "execution_delay": "next_m1_tick",
                 "feature_z_limit": 10.0,

@@ -65,8 +65,8 @@ class LivePolicyRuntime:
         if not 0 < self.max_risk_fraction <= 0.03:
             raise PermissionError("target-exposure risk fraction is invalid")
         self.market_context = str(bundle.get("market_context", ""))
-        if self.market_context != "binance_public_v1":
-            raise PermissionError("live policy market context is unavailable")
+        if self.market_context not in {"none", "binance_public_v1"}:
+            raise PermissionError("live policy market context contract is unsupported")
         if self.pipeline.fracdiff_selection is None:
             raise PermissionError("live feature pipeline must be fitted")
         self.required_h1_bars = max(
@@ -137,15 +137,17 @@ class LivePolicyRuntime:
         decision = decision.join(
             align_m1_features_to_decisions(realized[list(HAR_RV_COLUMNS)], decision.index)
         )
-        project_symbol = "BTC/USD" if self.book == "btc_usd" else "ETH/USD"
-        return decision.join(
-            load_binance_context(
-                project_symbol,
-                decision.index,
-                cache_dir=self.history_path.parent / f"{self.book}_context",
-                cache_only=False,
+        if self.market_context == "binance_public_v1":
+            project_symbol = "BTC/USD" if self.book == "btc_usd" else "ETH/USD"
+            decision = decision.join(
+                load_binance_context(
+                    project_symbol,
+                    decision.index,
+                    cache_dir=self.history_path.parent / f"{self.book}_context",
+                    cache_only=False,
+                )
             )
-        )
+        return decision
 
     def _action_intent(self, action: Any, timestamp: pd.Timestamp) -> TradeIntent:
         if self.algorithm == "cvar_qrdqn":

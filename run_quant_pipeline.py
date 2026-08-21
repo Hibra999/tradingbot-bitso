@@ -125,14 +125,15 @@ def main() -> int:
                     decision = decision.join(
                         align_m1_features_to_decisions(realized[list(HAR_RV_COLUMNS)], decision.index)
                     )
-                    decision = decision.join(
-                        load_binance_context(
-                            symbol,
-                            decision.index,
-                            cache_dir=config.data_dir,
-                            cache_only=config.cache_only,
+                    if config.binance_context_enabled:
+                        decision = decision.join(
+                            load_binance_context(
+                                symbol,
+                                decision.index,
+                                cache_dir=config.data_dir,
+                                cache_only=config.cache_only,
+                            )
                         )
-                    )
                     phase_bar.update()
                     phase_bar.set_postfix_str("training")
                     notifier.notify_phase("Training", symbol, f"{len(decision):,} H1 bars")

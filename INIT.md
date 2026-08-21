@@ -47,6 +47,7 @@ The code may load variables at runtime via `python-dotenv` and access them with 
 Required variables and expected defaults:
 
 CACHE_ONLY=true
+BINANCE_CONTEXT_ENABLED=false
 RL_RECURRENT_PPO_ENABLED=true
 RL_RECURRENT_PPO_TIMESTEPS=100000
 RL_RECURRENT_PPO_ENVS=16
