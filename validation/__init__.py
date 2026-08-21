@@ -1,6 +1,7 @@
 from .cpcv import CPCVFold, CPCVSplitter
 from .metrics import (
     ProbabilityRatio,
+    advanced_metrics,
     calmar_ratio,
     centered_block_bootstrap_test,
     deflated_sharpe_ratio,
@@ -25,6 +26,7 @@ __all__ = [
     "SeedEvaluation",
     "SeedHarness",
     "aggregate_seed_results",
+    "advanced_metrics",
     "calmar_ratio",
     "centered_block_bootstrap_test",
     "deflated_sharpe_ratio",

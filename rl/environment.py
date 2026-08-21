@@ -1,11 +1,17 @@
 from __future__ import annotations
+
 from typing import Literal
+
 import gymnasium as gym
-import numpy as np, pandas as pd
+import numpy as np
+import pandas as pd
 from gymnasium import spaces
+
 from validation import DomainRandomizer
+
 from .actions import ppo_intent, qrdqn_intent, sac_intent
 from .execution_core import BracketExecutionCore
+
 
 class BracketTradingEnvV2(gym.Env):
     metadata = {"render_modes": []}
@@ -32,23 +38,28 @@ class BracketTradingEnvV2(gym.Env):
         self.randomize = randomize
         self.base_spread = base_spread
         self.core = BracketExecutionCore(decision_bars, m1_bars)
+        self._timestamps = decision_bars.index.to_pydatetime()
         self.action_space = {
             "ppo": spaces.MultiDiscrete([3, 4, 4]),
-            "sac": spaces.Box(low=np.array([-1, 0.005, 1, 1], dtype=np.float32), high=np.array([1, 0.03, 3.5, 4], dtype=np.float32)),
+            "sac": spaces.Box(
+                low=np.array([-1, 0.005, 1, 1], dtype=np.float32),
+                high=np.array([1, 0.03, 3.5, 4], dtype=np.float32),
+            ),
             "qrdqn": spaces.Discrete(129),
         }[action_mode]
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=(len(feature_columns) + 3,), dtype=np.float32)
 
     def _observation(self) -> np.ndarray:
-        market = self.episode_features_arr[self.index]
-        pos = self.core.position
-        state = np.array([pos.direction, pos.decision_bars / 24, self.core.equity / self.core.initial_equity - 1], dtype=np.float32)
-        return np.nan_to_num(np.concatenate([market, state]), nan=0.0, posinf=10.0, neginf=-10.0)
+        position = self.core.position
+        observation = np.empty(self.observation_space.shape, dtype=np.float32)
+        observation[:-3] = self._feature_values[self.index]
+        observation[-3:] = position.direction, position.decision_bars / 24, self.core.equity / self.core.initial_equity - 1
+        return observation
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
         self.index = 0
-        self.core.reset()
+        self.core.reset()  # every disjoint CPCV segment starts flat
         features = self.decision_bars[self.feature_columns]
         if self.randomize:
             randomized = DomainRandomizer(seed or 0).perturb(features, self.decision_bars["atr"], self.base_spread)
@@ -59,15 +70,28 @@ class BracketTradingEnvV2(gym.Env):
             self.spreads = np.full(len(features), self.base_spread)
             self.slippages = np.zeros(len(features))
             self.latencies = np.ones(len(features), dtype=int)
-        self.episode_features_arr = self.episode_features.to_numpy(dtype=np.float32)
+        self._feature_values = np.nan_to_num(
+            self.episode_features.to_numpy(dtype=np.float32), nan=0.0, posinf=10.0, neginf=-10.0
+        )
         return self._observation(), {}
 
     def step(self, action):
-        timestamp = self.decision_bars.index[self.index].to_pydatetime()
-        kw = {"model_id": self.model_id, "book": self.book, "timestamp": timestamp}
-        intent = ppo_intent(action, **kw) if self.action_mode == "ppo" else (sac_intent(action, **kw) if self.action_mode == "sac" else qrdqn_intent(int(action), **kw))
-        result = self.core.execute_interval(self.index, intent, spread=float(self.spreads[self.index]), slippage=float(self.slippages[self.index]), latency_ticks=int(self.latencies[self.index]))
+        timestamp = self._timestamps[self.index]
+        kwargs = {"model_id": self.model_id, "book": self.book, "timestamp": timestamp}
+        if self.action_mode == "ppo":
+            intent = ppo_intent(action, **kwargs)
+        elif self.action_mode == "sac":
+            intent = sac_intent(action, **kwargs)
+        else:
+            intent = qrdqn_intent(int(action), **kwargs)
+        result = self.core.execute_interval(
+            self.index,
+            intent,
+            spread=float(self.spreads[self.index]),
+            slippage=float(self.slippages[self.index]),
+            latency_ticks=int(self.latencies[self.index]),
+        )
         self.index += 1
         terminated = self.index >= len(self.decision_bars) - 1
-        obs = np.zeros(self.observation_space.shape, dtype=np.float32) if terminated else self._observation()
-        return obs, result.reward, terminated, False, {"equity": result.equity, "realized_r": result.realized_r}
+        observation = np.zeros(self.observation_space.shape, dtype=np.float32) if terminated else self._observation()
+        return observation, result.reward, terminated, False, {"equity": result.equity, "realized_r": result.realized_r}

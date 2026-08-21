@@ -1,9 +1,23 @@
 from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
+
+
+@lru_cache(maxsize=1)
+def _torch_device() -> str:
+    try:
+        import torch
+    except ModuleNotFoundError:
+        return "cpu"
+    if not torch.cuda.is_available():
+        return "cpu"
+    torch.set_float32_matmul_precision("high")
+    torch.backends.cuda.matmul.allow_tf32 = True
+    return "cuda"
 
 
 def _require_pinned_stack() -> None:
@@ -32,6 +46,7 @@ def build_recurrent_ppo(env: Any, *, seed: int, **overrides: Any):
         "n_steps": 128,
         "batch_size": 128,
         "policy_kwargs": {"lstm_hidden_size": 128, "n_lstm_layers": 1, "net_arch": [128, 64]},
+        "device": _torch_device(),
         "seed": seed,
         "verbose": 0,
     }
@@ -43,7 +58,14 @@ def build_sac(env: Any, *, seed: int, **overrides: Any):
     _require_pinned_stack()
     from stable_baselines3 import SAC
 
-    options = {"learning_rate": 3e-4, "buffer_size": 100_000, "batch_size": 256, "seed": seed, "verbose": 0}
+    options = {
+        "learning_rate": 3e-4,
+        "buffer_size": 100_000,
+        "batch_size": 256,
+        "device": _torch_device(),
+        "seed": seed,
+        "verbose": 0,
+    }
     options.update(overrides)
     return SAC("MlpPolicy", env, **options)
 
@@ -110,7 +132,7 @@ class CVaRQRDQN(QRDQN):  # type: ignore[misc,valid-type]
     def train(self, gradient_steps: int, batch_size: int = 100) -> None:
         self.policy.set_training_mode(True)
         self._update_learning_rate(self.policy.optimizer)
-        losses = []
+        loss_total = th.zeros((), device=self.device)
         for _ in range(gradient_steps):
             replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)
             discounts = replay_data.discounts if replay_data.discounts is not None else self.gamma
@@ -124,7 +146,7 @@ class CVaRQRDQN(QRDQN):  # type: ignore[misc,valid-type]
             actions = replay_data.actions[..., None].long().expand(batch_size, self.n_quantiles, 1)
             current_quantiles = th.gather(current_quantiles, dim=2, index=actions).squeeze(dim=2)
             loss = quantile_huber_loss(current_quantiles, target_quantiles, sum_over_quantiles=True)
-            losses.append(loss.item())
+            loss_total += loss.detach()
             self.policy.optimizer.zero_grad()
             loss.backward()
             if self.max_grad_norm is not None:
@@ -132,7 +154,7 @@ class CVaRQRDQN(QRDQN):  # type: ignore[misc,valid-type]
             self.policy.optimizer.step()
         self._n_updates += gradient_steps
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
-        self.logger.record("train/loss", np.mean(losses))
+        self.logger.record("train/loss", (loss_total / gradient_steps).item())
 
 
 def build_cvar_qrdqn(env: Any, *, seed: int, **overrides: Any) -> CVaRQRDQN:
@@ -141,6 +163,7 @@ def build_cvar_qrdqn(env: Any, *, seed: int, **overrides: Any) -> CVaRQRDQN:
         "buffer_size": 100_000,
         "batch_size": 64,
         "policy_kwargs": {"n_quantiles": 200, "net_arch": [128, 64]},
+        "device": _torch_device(),
         "seed": seed,
         "verbose": 0,
     }

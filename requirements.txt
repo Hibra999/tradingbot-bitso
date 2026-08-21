@@ -168,6 +168,8 @@ python-dotenv==1.2.3
     # via -r requirements.in
 python-telegram-bot==22.8
     # via -r requirements.in
+quantstats==0.0.81
+    # via -r requirements.in
 pytz==2026.3.post1
     # via alpaca-py
 pywavelets==1.9.0
@@ -206,8 +208,6 @@ threadpoolctl==3.6.0
     # via scikit-learn
 torch==2.13.0
     # via stable-baselines3
-tqdm==4.70.0
-    # via -r requirements.in
 triton==3.7.1
     # via torch
 typing-extensions==4.16.0

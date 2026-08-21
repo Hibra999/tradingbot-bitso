@@ -20,6 +20,30 @@ def env_flag(name: str, default: bool = False) -> bool:
     raise ValueError(f"{name} must be a boolean flag")
 
 
+def env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    value = os.getenv(name)
+    try:
+        result = default if value is None or not value.strip() else int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if result < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    return result
+
+
+def env_seeds(name: str, default: int) -> tuple[int, ...]:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return tuple(range(default))
+    try:
+        seeds = tuple(int(item.strip()) for item in value.split(",")) if "," in value else tuple(range(int(value)))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive count or comma-separated integers") from exc
+    if not seeds or min(seeds) < 0 or len(set(seeds)) != len(seeds):
+        raise ValueError(f"{name} must define unique non-negative seeds")
+    return seeds
+
+
 def required_secret(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
@@ -44,100 +68,49 @@ class RLConfig:
     sl_atr_multipliers: tuple[float, ...] = (1.0, 1.5, 2.5, 3.5)
     tp_sl_ratios: tuple[float, ...] = (1.0, 1.5, 2.0, 4.0)
     max_holding_bars: int = 24
-    timesteps: dict[str, int] = field(default_factory=lambda: {
-        "recurrent_ppo": 100_000,
-        "sac": 100_000,
-        "cvar_qrdqn": 100_000,
-    })
-    evaluations: int = 10
+    timesteps: dict[str, int] = field(
+        default_factory=lambda: {"recurrent_ppo": 100_000, "sac": 100_000, "cvar_qrdqn": 100_000}
+    )
+    evaluations: int = 5
 
     @classmethod
     def from_env(cls) -> "RLConfig":
-        """Build RLConfig reading per-algorithm toggles and timesteps from env.
-
-        Env vars (all optional, defaults shown):
-            RL_RECURRENT_PPO_ENABLED=true
-            RL_RECURRENT_PPO_TIMESTEPS=100000
-            RL_SAC_ENABLED=true
-            RL_SAC_TIMESTEPS=100000
-            RL_CVAR_QRDQN_ENABLED=true
-            RL_CVAR_QRDQN_TIMESTEPS=100000
-            RL_EVALUATIONS=10
-        """
-        all_algos = ("recurrent_ppo", "sac", "cvar_qrdqn")
-        env_prefix = {
+        names = {
             "recurrent_ppo": "RL_RECURRENT_PPO",
             "sac": "RL_SAC",
             "cvar_qrdqn": "RL_CVAR_QRDQN",
         }
-
-        enabled: list[str] = []
-        ts: dict[str, int] = {}
-        for algo in all_algos:
-            prefix = env_prefix[algo]
-            is_on = os.getenv(f"{prefix}_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
-            if is_on:
-                enabled.append(algo)
-            ts[algo] = int(os.getenv(f"{prefix}_TIMESTEPS", "100000"))
-
-        evaluations = int(os.getenv("RL_EVALUATIONS", "10"))
-
         return cls(
-            algorithms=tuple(enabled),
-            timesteps=ts,
-            evaluations=evaluations,
+            algorithms=tuple(name for name, prefix in names.items() if env_flag(f"{prefix}_ENABLED", True)),
+            timesteps={name: env_int(f"{prefix}_TIMESTEPS", 100_000) for name, prefix in names.items()},
+            evaluations=env_int("RL_EVALUATIONS", 5),
         )
 
 
 @dataclass(frozen=True)
 class ValidationConfig:
-    temporal_groups: int = 6
+    temporal_groups: int = 3
     test_groups: int = 2
     embargo_bars: int = 200
     max_holding_bars: int = 24
-    full_seeds: tuple[int, ...] = tuple(range(10))
+    full_seeds: tuple[int, ...] = (0, 1)
     smoke_seeds: tuple[int, ...] = (0,)
     monte_carlo_paths: int = 5_000
 
+    def __post_init__(self) -> None:
+        if not 1 <= self.test_groups < self.temporal_groups:
+            raise ValueError("test_groups must be in [1, temporal_groups)")
+        if self.embargo_bars < 0 or self.max_holding_bars < 1 or not self.full_seeds or not self.smoke_seeds:
+            raise ValueError("validation bars and seeds must be positive")
+
     @classmethod
     def from_env(cls) -> "ValidationConfig":
-        temporal_groups = int(os.getenv("VALIDATION_TEMPORAL_GROUPS", "6"))
-        test_groups = int(os.getenv("VALIDATION_TEST_GROUPS", "2"))
-        embargo_bars = int(os.getenv("VALIDATION_EMBARGO_BARS", "200"))
-        max_holding_bars = int(os.getenv("VALIDATION_MAX_HOLDING_BARS", "24"))
-
-        full_seeds_val = os.getenv("VALIDATION_FULL_SEEDS")
-        if full_seeds_val is not None and full_seeds_val.strip():
-            raw = full_seeds_val.strip()
-            if "," in raw:
-                full_seeds = tuple(int(x.strip()) for x in raw.split(",") if x.strip())
-            else:
-                count = int(raw)
-                full_seeds = tuple(range(count))
-        else:
-            full_seeds = tuple(range(10))
-
-        smoke_seeds_val = os.getenv("VALIDATION_SMOKE_SEEDS")
-        if smoke_seeds_val is not None and smoke_seeds_val.strip():
-            raw = smoke_seeds_val.strip()
-            if "," in raw:
-                smoke_seeds = tuple(int(x.strip()) for x in raw.split(",") if x.strip())
-            else:
-                count = int(raw)
-                smoke_seeds = tuple(range(count))
-        else:
-            smoke_seeds = (0,)
-
-        monte_carlo_paths = int(os.getenv("VALIDATION_MONTE_CARLO_PATHS", "5000"))
-
         return cls(
-            temporal_groups=temporal_groups,
-            test_groups=test_groups,
-            embargo_bars=embargo_bars,
-            max_holding_bars=max_holding_bars,
-            full_seeds=full_seeds,
-            smoke_seeds=smoke_seeds,
-            monte_carlo_paths=monte_carlo_paths,
+            temporal_groups=env_int("VALIDATION_TEMPORAL_GROUPS", 3, minimum=2),
+            test_groups=env_int("VALIDATION_TEST_GROUPS", 2),
+            full_seeds=env_seeds("VALIDATION_FULL_SEEDS", 2),
+            embargo_bars=env_int("VALIDATION_EMBARGO_BARS", 200, minimum=0),
+            monte_carlo_paths=env_int("VALIDATION_MONTE_CARLO_PATHS", 5_000),
         )
 
 
@@ -177,6 +150,7 @@ class AppConfig:
     journal_path: Path = Path("data/execution.sqlite3")
     paper_mode: bool = True
     allow_margin_shorts: bool = False
+    cache_only: bool = True
     bitso: BitsoConfig = field(default_factory=BitsoConfig)
     rl: RLConfig = field(default_factory=RLConfig)
     validation: ValidationConfig = field(default_factory=ValidationConfig)
@@ -209,6 +183,7 @@ class AppConfig:
             profile=profile,
             paper_mode=not live,
             allow_margin_shorts=env_flag("BITSO_MARGIN_SHORTS_ENABLED"),
+            cache_only=env_flag("CACHE_ONLY", True),
             rl=RLConfig.from_env(),
             validation=ValidationConfig.from_env(),
         )

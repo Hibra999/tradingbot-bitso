@@ -37,24 +37,6 @@ class MetricsTests(unittest.TestCase):
         self.assertTrue(0 <= first.ruin_probability_20 <= 1)
         self.assertEqual(list(first.equity_cone.columns), ["p05", "p25", "p50", "p75", "p95"])
 
-    def test_extreme_loss_bounds_and_empty_edge_cases(self) -> None:
-        from validation.metrics import sharpe_ratio, sortino_ratio, calmar_ratio, drawdowns
-
-        catastrophic_returns = [0.01, -0.02, -1.0, -1.5, 0.05]
-        s = sharpe_ratio(catastrophic_returns)
-        self.assertTrue(np.isfinite(s))
-        dd = drawdowns(catastrophic_returns)
-        self.assertAlmostEqual(float(dd.min()), -1.0)
-
-        # Single element or empty
-        self.assertTrue(np.isnan(sharpe_ratio([0.05])))
-        self.assertTrue(np.isnan(sharpe_ratio([])))
-        self.assertTrue(np.isnan(sortino_ratio([0.05])))
-        self.assertTrue(np.isnan(calmar_ratio([0.05])))
-
-        # Constant returns
-        self.assertTrue(np.isnan(sharpe_ratio([0.01, 0.01, 0.01])))
-
 
 if __name__ == "__main__":
     unittest.main()

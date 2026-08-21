@@ -1,125 +1,132 @@
-"""Lightweight synchronous Telegram notifier for pipeline progress.
-
-This module is designed to work *outside* the async live-service context.
-It uses ``httpx`` (already a project dependency) to send plain messages and
-photos to the Telegram Bot API without pulling in the full
-``python-telegram-bot`` stack or requiring an event loop.
-
-If ``TELEGRAM_BOT_TOKEN`` or ``TELEGRAM_ALLOWED_CHAT_IDS`` are not set, every
-method silently no-ops so the pipeline keeps running without Telegram.
-"""
-
 from __future__ import annotations
 
 import os
+import threading
 import time
 from pathlib import Path
-from typing import Optional, Union
 
 import httpx
 
 
-def _parse_chat_ids(raw: str) -> list[int]:
-    """Parse a comma-separated string of chat IDs into a list of ints."""
-    ids: list[int] = []
-    for item in raw.split(","):
-        item = item.strip()
-        if item:
-            ids.append(int(item))
-    return ids
+def _parse_chat_ids(value: str) -> tuple[int, ...]:
+    try:
+        return tuple(dict.fromkeys(int(item.strip()) for item in value.split(",") if item.strip()))
+    except ValueError:
+        return ()
 
 
 class PipelineNotifier:
-    """Send pipeline progress updates to Telegram chats.
-
-    Instantiation never raises -- if credentials are missing the notifier
-    becomes a silent no-op.
-    """
-
     BASE_URL = "https://api.telegram.org/bot{token}"
 
-    def __init__(self, *, min_interval: float = 1.0) -> None:
-        self._token: Optional[str] = None
-        self._chat_ids: list[int] = []
-        self._enabled = False
-        self._min_interval = min_interval
-        self._last_send: float = 0.0
-        self._client: Optional[httpx.Client] = None
-
-        token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
-        chat_ids_raw = (os.getenv("TELEGRAM_ALLOWED_CHAT_IDS") or "").strip()
-
-        if not token or not chat_ids_raw:
-            return
-
-        try:
-            self._chat_ids = _parse_chat_ids(chat_ids_raw)
-        except ValueError:
-            return
-
-        if not self._chat_ids:
-            return
-
-        self._token = token
-        self._enabled = True
-        self._client = httpx.Client(timeout=15.0)
+    def __init__(self, *, min_interval: float = 0.05, update_interval: float = 60.0) -> None:
+        token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        self._chat_ids = _parse_chat_ids(os.getenv("TELEGRAM_ALLOWED_CHAT_IDS", ""))
+        self._client = httpx.Client(timeout=15.0) if token and self._chat_ids else None
+        self._url = f"{self.BASE_URL.format(token=token)}/{{}}" if self._client else ""
+        self._min_interval, self._update_interval = max(0.0, min_interval), max(5.0, update_interval)
+        self._last_send = 0.0
+        self._send_lock, self._state_lock = threading.Lock(), threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._status, self._started = "", 0.0
+        self._message_ids: dict[int, int] = {}
 
     @property
     def enabled(self) -> bool:
-        return self._enabled
+        return self._client is not None
 
-    def _throttle(self) -> None:
-        """Ensure we don't exceed Telegram's rate limits."""
-        elapsed = time.monotonic() - self._last_send
-        if elapsed < self._min_interval:
-            time.sleep(self._min_interval - elapsed)
-        self._last_send = time.monotonic()
-
-    def _url(self, method: str) -> str:
-        return f"{self.BASE_URL.format(token=self._token)}/{method}"
+    def _post(self, method: str, *, json: dict | None = None, data: dict | None = None, files: dict | None = None):
+        if not self._client:
+            return None
+        with self._send_lock:
+            delay = self._min_interval - (time.monotonic() - self._last_send)
+            if delay > 0:
+                time.sleep(delay)
+            try:
+                response = self._client.post(self._url.format(method), json=json, data=data, files=files)
+                self._last_send = time.monotonic()
+                response.raise_for_status()
+                return response.json().get("result")
+            except (httpx.HTTPError, ValueError):
+                self._last_send = time.monotonic()
+                return None
 
     def notify(self, text: str) -> None:
-        """Send a text message to all allowed chats."""
-        if not self._enabled or not self._client:
-            return
-        self._throttle()
         for chat_id in self._chat_ids:
-            try:
-                self._client.post(
-                    self._url("sendMessage"),
-                    json={"chat_id": chat_id, "text": text[:4000], "parse_mode": "HTML"},
-                )
-            except Exception:
-                continue
+            self._post("sendMessage", json={"chat_id": chat_id, "text": text[:4000]})
 
-    def send_photo(self, path: Union[str, Path], caption: str = "") -> None:
-        """Send a photo file to all allowed chats."""
-        if not self._enabled or not self._client:
-            return
-        path = Path(path)
-        if not path.exists():
-            return
-        self._throttle()
+    def _publish_status(self) -> None:
+        with self._state_lock:
+            text = f"{self._status}\nElapsed: {int(time.monotonic() - self._started)}s"[:4000]
         for chat_id in self._chat_ids:
-            try:
-                with open(path, "rb") as f:
-                    self._client.post(
-                        self._url("sendPhoto"),
-                        data={"chat_id": chat_id, "caption": caption[:1024]},
-                        files={"photo": (path.name, f, "image/png")},
-                    )
-            except Exception:
-                continue
+            message_id = self._message_ids.get(chat_id)
+            result = (
+                self._post("editMessageText", json={"chat_id": chat_id, "message_id": message_id, "text": text})
+                if message_id
+                else None
+            )
+            if result is None:
+                result = self._post("sendMessage", json={"chat_id": chat_id, "text": text})
+            if result:
+                self._message_ids[chat_id] = int(result["message_id"])
+
+    def start_updates(self, status: str) -> None:
+        if not self.enabled:
+            return
+        self.stop_updates()
+        with self._state_lock:
+            self._status, self._started = status, time.monotonic()
+        self._message_ids.clear()
+        self._stop.clear()
+        self._publish_status()
+        self._thread = threading.Thread(target=self._update_loop, name="telegram-pipeline-updates", daemon=True)
+        self._thread.start()
+
+    def update(self, status: str) -> None:
+        with self._state_lock:
+            self._status = status
+
+    def _update_loop(self) -> None:
+        while not self._stop.wait(self._update_interval):
+            self._publish_status()
+
+    def stop_updates(self, final_status: str | None = None) -> None:
+        thread, self._thread = self._thread, None
+        self._stop.set()
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+        if final_status and self.enabled:
+            self.update(final_status)
+            self._publish_status()
 
     def notify_phase(self, phase: str, symbol: str, detail: str = "") -> None:
-        """Send a formatted phase-progress message."""
-        text = f"<b>{phase}</b> | {symbol}"
-        if detail:
-            text += f"\n{detail}"
+        text = f"{phase} | {symbol}" + (f"\n{detail}" if detail else "")
+        self.update(text)
         self.notify(text)
 
+    def _send_file(self, method: str, field: str, path: str | Path, caption: str) -> None:
+        source = Path(path)
+        if not self.enabled or not source.is_file():
+            return
+        for chat_id in self._chat_ids:
+            try:
+                with source.open("rb") as stream:
+                    self._post(
+                        method,
+                        data={"chat_id": chat_id, "caption": caption[:1024]},
+                        files={field: (source.name, stream)},
+                    )
+            except OSError:
+                continue
+
+    def send_photo(self, path: str | Path, caption: str = "") -> None:
+        self._send_file("sendPhoto", "photo", path, caption)
+
+    def send_document(self, path: str | Path, caption: str = "") -> None:
+        self._send_file("sendDocument", "document", path, caption)
+
     def close(self) -> None:
-        """Close the underlying HTTP client."""
+        self.stop_updates()
         if self._client:
             self._client.close()
             self._client = None

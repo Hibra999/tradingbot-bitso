@@ -10,11 +10,11 @@ pyarrow==25.0.1
 PyWavelets==1.9.0
 python-dotenv==1.2.3
 python-telegram-bot==22.8
+quantstats==0.0.81
 sb3-contrib==2.9.0
 scikit-learn==1.9.0
 scipy==1.17.1
 stable-baselines3==2.9.0
 statsmodels==0.14.6
-tqdm==4.70.0
 uvicorn==0.52.4
 websockets==17.0.1

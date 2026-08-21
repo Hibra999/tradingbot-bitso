@@ -6,13 +6,10 @@ from pathlib import Path
 from typing import Optional, Union
 
 import pandas as pd
-from dotenv import load_dotenv
 
 from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
 from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
-
-load_dotenv()
 
 OHLCV = ["Open", "High", "Low", "Close", "Volume"]
 
@@ -46,8 +43,8 @@ def _get_credentials() -> tuple[str, str]:
     secret = (os.getenv("ALPACA_SECRET_KEY") or "").strip()
     if not key or not secret or "pon_tu" in key.lower():
         raise RuntimeError(
-            "Alpaca credentials missing. Open '.env' (created from .env.example) "
-            "and set ALPACA_API_KEY / ALPACA_SECRET_KEY with your keys from "
+            "Alpaca credentials missing. Set ALPACA_API_KEY / ALPACA_SECRET_KEY in the process environment; "
+            "create keys at "
             "https://alpaca.markets (Paper Trading -> API Keys)."
         )
     return key, secret
@@ -140,9 +137,6 @@ timestamp_is_bar_open : optional bool
     feed : str
         Stock data feed: "iex" (free plan, 15-min delayed) or "sip" (paid,
         real-time consolidated tape). Ignored for crypto.
-    cache_only : bool
-        If True, return only cached data without making any API calls.
-        Raises RuntimeError if no cache file exists for this symbol/timeframe.
 
     Returns
     -------
@@ -182,26 +176,24 @@ timestamp_is_bar_open : optional bool
         cache_path = Path(cache_dir) / f"alpaca_{symbol.replace('/', '_')}_{pandas_rule}.parquet"
         if cache_path.exists():
             cached = _read_cached_parquet(cache_path)
-
-    # -- cache_only mode: return whatever is cached, no API calls --------
-    if cache_only:
-        if cached is not None and len(cached):
-            print(f"Alpaca: cache-only -> {cache_path.name if cache_path else 'memory'} ({len(cached):,} bars)")
-            return _slice_range(cached, start, min(end, cached.index.max()), max_days_for_demo)
-        raise RuntimeError(
-            f"Cache-only mode but no cached data found for {symbol} ({pandas_rule}). "
-            f"Run once with CACHE_ONLY=false to download data first."
-        )
-
-    if cached is not None and len(cached):
-        end_tolerance = pd.Timedelta(days=7) if pandas_rule == "1D" else pd.Timedelta(days=1)
-        if cached.index.max() >= end - end_tolerance:
-            print(f"Alpaca: cache hit -> {cache_path.name} ({len(cached):,} bars)")
-            return _slice_range(cached, start, min(end, cached.index.max()), max_days_for_demo)
-        print(f"Alpaca: cache covers {cached.index.min()} -> {cached.index.max()}; refreshing the tail only")
-        fetch_start = cached.index.max() - bar_delta  # re-fetch the boundary bar for a clean merge
-    else:
-        cached = None
+        if cache_only:
+            if cached is None or cached.empty:
+                raise RuntimeError(f"No cached data found for {symbol} ({pandas_rule})")
+            result = _slice_range(cached, start, min(end, cached.index.max()), max_days_for_demo)
+            if result.empty:
+                raise RuntimeError(f"Cached data does not cover the requested range for {symbol} ({pandas_rule})")
+            return result
+        if cached is not None and len(cached) and cached.index.min() <= start:
+            end_tolerance = pd.Timedelta(days=7) if pandas_rule == "1D" else pd.Timedelta(days=1)
+            if cached.index.max() >= end - end_tolerance:
+                print(f"Alpaca: cache hit -> {cache_path.name} ({len(cached):,} bars)")
+                return _slice_range(cached, start, min(end, cached.index.max()), max_days_for_demo)
+            print(f"Alpaca: cache covers {cached.index.min()} -> {cached.index.max()}; refreshing the tail only")
+            fetch_start = cached.index.max() - bar_delta  # re-fetch the boundary bar for a clean merge
+        else:
+            cached = None
+    elif cache_only:
+        raise RuntimeError(f"No cache directory configured for {symbol} ({pandas_rule})")
 
     api_key, secret_key = _get_credentials()
 
