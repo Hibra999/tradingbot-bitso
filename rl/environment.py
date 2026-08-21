@@ -7,9 +7,10 @@ import numpy as np
 import pandas as pd
 from gymnasium import spaces
 
+from config import RLConfig
 from validation import DomainRandomizer
 
-from .actions import ppo_intent, qrdqn_intent, sac_intent
+from .actions import qrdqn_action_table
 from .execution_core import BracketExecutionCore
 
 
@@ -27,6 +28,7 @@ class BracketTradingEnvV2(gym.Env):
         model_id: str = "training",
         randomize: bool = True,
         base_spread: float = 0.0,
+        random_seed: int = 0,
     ):
         super().__init__()
         self.decision_bars = decision_bars
@@ -37,8 +39,12 @@ class BracketTradingEnvV2(gym.Env):
         self.model_id = model_id
         self.randomize = randomize
         self.base_spread = base_spread
+        self._random_seed = int(random_seed)
         self.core = BracketExecutionCore(decision_bars, m1_bars)
-        self._timestamps = decision_bars.index.to_pydatetime()
+        cfg = RLConfig()
+        self._risk_fraction = cfg.risk_fractions[0]
+        self._sl_atr_multipliers, self._tp_sl_ratios = cfg.sl_atr_multipliers, cfg.tp_sl_ratios
+        self._qrdqn_actions = qrdqn_action_table(cfg)
         self.action_space = {
             "ppo": spaces.MultiDiscrete([3, 4, 4]),
             "sac": spaces.Box(
@@ -62,7 +68,11 @@ class BracketTradingEnvV2(gym.Env):
         self.core.reset()  # every disjoint CPCV segment starts flat
         features = self.decision_bars[self.feature_columns]
         if self.randomize:
-            randomized = DomainRandomizer(seed or 0).perturb(features, self.decision_bars["atr"], self.base_spread)
+            if seed is not None:
+                self._random_seed = int(seed)
+            randomized = DomainRandomizer(self._random_seed).perturb(
+                features, self.decision_bars["atr"], self.base_spread
+            )
             self.episode_features = randomized.features
             self.spreads, self.slippages, self.latencies = randomized.spread, randomized.slippage, randomized.latency_ticks
         else:
@@ -76,17 +86,25 @@ class BracketTradingEnvV2(gym.Env):
         return self._observation(), {}
 
     def step(self, action):
-        timestamp = self._timestamps[self.index]
-        kwargs = {"model_id": self.model_id, "book": self.book, "timestamp": timestamp}
         if self.action_mode == "ppo":
-            intent = ppo_intent(action, **kwargs)
+            direction_index, sl_index, tp_index = (int(value) for value in action)
+            if direction_index not in (0, 1, 2):
+                raise ValueError("PPO direction must be 0=flat, 1=long, or 2=short")
+            direction, risk = (0, 1, -1)[direction_index], self._risk_fraction
+            sl, tp = self._sl_atr_multipliers[sl_index], self._tp_sl_ratios[tp_index]
         elif self.action_mode == "sac":
-            intent = sac_intent(action, **kwargs)
+            direction_score, risk, sl, tp = (float(value) for value in action)
+            if not (-1 <= direction_score <= 1 and 0.005 <= risk <= 0.03 and 1 <= sl <= 3.5 and 1 <= tp <= 4):
+                raise ValueError("SAC action is outside its declared Box")
+            direction = 0 if abs(direction_score) < 0.1 else (1 if direction_score > 0 else -1)
         else:
-            intent = qrdqn_intent(int(action), **kwargs)
-        result = self.core.execute_interval(
+            direction, risk, sl, tp = self._qrdqn_actions[int(action)]
+        reward, realized_r, equity = self.core.execute_values(
             self.index,
-            intent,
+            int(direction),
+            float(risk),
+            float(sl),
+            float(tp),
             spread=float(self.spreads[self.index]),
             slippage=float(self.slippages[self.index]),
             latency_ticks=int(self.latencies[self.index]),
@@ -94,4 +112,4 @@ class BracketTradingEnvV2(gym.Env):
         self.index += 1
         terminated = self.index >= len(self.decision_bars) - 1
         observation = np.zeros(self.observation_space.shape, dtype=np.float32) if terminated else self._observation()
-        return observation, result.reward, terminated, False, {"equity": result.equity, "realized_r": result.realized_r}
+        return observation, reward, terminated, False, {"equity": equity, "realized_r": realized_r}

@@ -72,6 +72,7 @@ class RLConfig:
         default_factory=lambda: {"recurrent_ppo": 100_000, "sac": 100_000, "cvar_qrdqn": 100_000}
     )
     evaluations: int = 5
+    recurrent_ppo_envs: int = 16
 
     @classmethod
     def from_env(cls) -> "RLConfig":
@@ -84,6 +85,7 @@ class RLConfig:
             algorithms=tuple(name for name, prefix in names.items() if env_flag(f"{prefix}_ENABLED", True)),
             timesteps={name: env_int(f"{prefix}_TIMESTEPS", 100_000) for name, prefix in names.items()},
             evaluations=env_int("RL_EVALUATIONS", 5),
+            recurrent_ppo_envs=env_int("RL_RECURRENT_PPO_ENVS", 16),
         )
 
 

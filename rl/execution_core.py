@@ -81,11 +81,21 @@ class BracketExecutionCore:
     def _exit_price(price: float, direction: int, spread: float, slippage: float) -> float:
         return price - direction * (spread / 2 + slippage)
 
-    def _open(self, intent: TradeIntent, timestamp: pd.Timestamp, raw_price: float, atr: float, spread: float, slippage: float) -> None:
-        direction = intent.direction
+    def _open(
+        self,
+        direction: int,
+        risk_fraction: float,
+        sl_atr_multiplier: float,
+        tp_sl_ratio: float,
+        timestamp: pd.Timestamp,
+        raw_price: float,
+        atr: float,
+        spread: float,
+        slippage: float,
+    ) -> None:
         entry = self._entry_price(raw_price, direction, spread, slippage)
-        stop_distance = max(float(intent.sl_atr_multiplier) * atr, 1e-12)
-        risk_cash = max(self.equity * float(intent.risk_fraction), 1e-12)
+        stop_distance = max(sl_atr_multiplier * atr, 1e-12)
+        risk_cash = max(self.equity * risk_fraction, 1e-12)
         quantity = risk_cash / stop_distance
         commission = entry * quantity * self.commission_rate
         self.equity -= commission
@@ -94,7 +104,7 @@ class BracketExecutionCore:
             entry_time=timestamp,
             entry_price=entry,
             stop_price=entry - direction * stop_distance,
-            take_profit_price=entry + direction * stop_distance * float(intent.tp_sl_ratio),
+            take_profit_price=entry + direction * stop_distance * tp_sl_ratio,
             quantity=quantity,
             risk_cash=risk_cash,
             entry_commission=commission,
@@ -168,6 +178,54 @@ class BracketExecutionCore:
         slippage: float = 0.0,
         latency_ticks: int = 1,
     ) -> StepResult:
+        return StepResult(
+            *self._execute_values(
+                decision_index,
+                intent.direction,
+                float(intent.risk_fraction),
+                float(intent.sl_atr_multiplier),
+                float(intent.tp_sl_ratio),
+                spread,
+                slippage,
+                latency_ticks,
+            )
+        )
+
+    def execute_values(
+        self,
+        decision_index: int,
+        direction: int,
+        risk_fraction: float,
+        sl_atr_multiplier: float,
+        tp_sl_ratio: float,
+        *,
+        spread: float = 0.0,
+        slippage: float = 0.0,
+        latency_ticks: int = 1,
+    ) -> tuple[float, float, float]:
+        reward, realized_r, _, _, _, equity = self._execute_values(
+            decision_index,
+            direction,
+            risk_fraction,
+            sl_atr_multiplier,
+            tp_sl_ratio,
+            spread,
+            slippage,
+            latency_ticks,
+        )
+        return reward, realized_r, equity
+
+    def _execute_values(
+        self,
+        decision_index: int,
+        direction: int,
+        risk_fraction: float,
+        sl_atr_multiplier: float,
+        tp_sl_ratio: float,
+        spread: float,
+        slippage: float,
+        latency_ticks: int,
+    ) -> tuple[float, float, float, float, float, float]:
         if not 0 <= decision_index < len(self.decision_bars) - 1 or latency_ticks < 1:
             raise ValueError("invalid decision index or latency")
         start, end = self._decision_index[decision_index : decision_index + 2]
@@ -183,11 +241,21 @@ class BracketExecutionCore:
         realized_r = self._scan_position(lo, split, spread, slippage)
         if action_tick < hi:
             timestamp = self._m1_index[action_tick]
-            if intent.direction != self.position.direction:
+            if direction != self.position.direction:
                 if self.position.direction:
                     realized_r += self._close(timestamp, self._m1_open[action_tick], "signal", spread, slippage)
-                if intent.direction:
-                    self._open(intent, timestamp, self._m1_open[action_tick], atr_value, spread, slippage)
+                if direction:
+                    self._open(
+                        direction,
+                        risk_fraction,
+                        sl_atr_multiplier,
+                        tp_sl_ratio,
+                        timestamp,
+                        self._m1_open[action_tick],
+                        atr_value,
+                        spread,
+                        slippage,
+                    )
             realized_r += self._scan_position(action_tick, hi, spread, slippage)
 
         holding_cost = 0.0
@@ -202,4 +270,4 @@ class BracketExecutionCore:
         differential = self._differential_sharpe(realized_r)
         penalty = self.downside_penalty * min(realized_r, 0) ** 2
         reward = realized_r + self.differential_sharpe_weight * differential - penalty - holding_cost
-        return StepResult(reward, realized_r, differential, penalty, holding_cost, self.equity)
+        return reward, realized_r, differential, penalty, holding_cost, self.equity

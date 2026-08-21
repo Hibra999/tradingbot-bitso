@@ -17,6 +17,7 @@ def _torch_device() -> str:
         return "cpu"
     torch.set_float32_matmul_precision("high")
     torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
     return "cuda"
 
 
@@ -41,11 +42,21 @@ def build_recurrent_ppo(env: Any, *, seed: int, **overrides: Any):
     _require_pinned_stack()
     from sb3_contrib import RecurrentPPO
 
+    n_steps = 256
+    rollout_size = n_steps * getattr(env, "num_envs", 1)
+    batch_size = min(1_024, rollout_size)
+    while rollout_size % batch_size:
+        batch_size //= 2
     options = {
         "learning_rate": 3e-4,
-        "n_steps": 128,
-        "batch_size": 128,
-        "policy_kwargs": {"lstm_hidden_size": 128, "n_lstm_layers": 1, "net_arch": [128, 64]},
+        "n_steps": n_steps,
+        "batch_size": batch_size,
+        "policy_kwargs": {
+            "lstm_hidden_size": 128,
+            "n_lstm_layers": 1,
+            "net_arch": [128, 64],
+            "optimizer_kwargs": {"foreach": True},
+        },
         "device": _torch_device(),
         "seed": seed,
         "verbose": 0,
@@ -58,10 +69,14 @@ def build_sac(env: Any, *, seed: int, **overrides: Any):
     _require_pinned_stack()
     from stable_baselines3 import SAC
 
+    batch_size = min(512, max(256, 64 * getattr(env, "num_envs", 1)))
     options = {
         "learning_rate": 3e-4,
         "buffer_size": 100_000,
-        "batch_size": 256,
+        "batch_size": batch_size,
+        "train_freq": (16, "step"),
+        "gradient_steps": 16,
+        "policy_kwargs": {"optimizer_kwargs": {"foreach": True}},
         "device": _torch_device(),
         "seed": seed,
         "verbose": 0,
@@ -132,13 +147,13 @@ class CVaRQRDQN(QRDQN):  # type: ignore[misc,valid-type]
     def train(self, gradient_steps: int, batch_size: int = 100) -> None:
         self.policy.set_training_mode(True)
         self._update_learning_rate(self.policy.optimizer)
-        loss_total = th.zeros((), device=self.device)
+        tail_count, losses = self._tail_count(), []
         for _ in range(gradient_steps):
             replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)
             discounts = replay_data.discounts if replay_data.discounts is not None else self.gamma
             with th.no_grad():
                 next_quantiles = self.quantile_net_target(replay_data.next_observations)
-                next_actions = next_quantiles[:, : self._tail_count(), :].mean(dim=1, keepdim=True).argmax(dim=2, keepdim=True)
+                next_actions = next_quantiles[:, :tail_count, :].mean(dim=1, keepdim=True).argmax(dim=2, keepdim=True)
                 next_actions = next_actions.expand(batch_size, self.n_quantiles, 1)
                 next_quantiles = next_quantiles.gather(dim=2, index=next_actions).squeeze(dim=2)
                 target_quantiles = replay_data.rewards + (1 - replay_data.dones) * discounts * next_quantiles
@@ -146,23 +161,26 @@ class CVaRQRDQN(QRDQN):  # type: ignore[misc,valid-type]
             actions = replay_data.actions[..., None].long().expand(batch_size, self.n_quantiles, 1)
             current_quantiles = th.gather(current_quantiles, dim=2, index=actions).squeeze(dim=2)
             loss = quantile_huber_loss(current_quantiles, target_quantiles, sum_over_quantiles=True)
-            loss_total += loss.detach()
-            self.policy.optimizer.zero_grad()
+            losses.append(loss.detach())
+            self.policy.optimizer.zero_grad(set_to_none=True)
             loss.backward()
             if self.max_grad_norm is not None:
                 th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
             self.policy.optimizer.step()
         self._n_updates += gradient_steps
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
-        self.logger.record("train/loss", (loss_total / gradient_steps).item())
+        self.logger.record("train/loss", th.stack(losses).mean().item() if losses else float("nan"))
 
 
 def build_cvar_qrdqn(env: Any, *, seed: int, **overrides: Any) -> CVaRQRDQN:
+    batch_size = min(256, max(64, 16 * getattr(env, "num_envs", 1)))
     options = {
         "learning_rate": 5e-5,
         "buffer_size": 100_000,
-        "batch_size": 64,
-        "policy_kwargs": {"n_quantiles": 200, "net_arch": [128, 64]},
+        "batch_size": batch_size,
+        "train_freq": (32, "step"),
+        "gradient_steps": 8,
+        "policy_kwargs": {"n_quantiles": 200, "net_arch": [128, 64], "optimizer_kwargs": {"foreach": True}},
         "device": _torch_device(),
         "seed": seed,
         "verbose": 0,

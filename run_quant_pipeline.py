@@ -50,7 +50,7 @@ def main() -> int:
             return CandidateRun(tuple(returns), str(artifact), validation_return)
 
     runner = (
-        SB3CandidateRunner(config.rl.timesteps, config.rl.evaluations, notifier)
+        SB3CandidateRunner(config.rl.timesteps, config.rl.evaluations, notifier, config.rl.recurrent_ppo_envs)
         if args.profile == "full"
         else SmokeRunner()
     )

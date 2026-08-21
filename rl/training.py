@@ -96,19 +96,24 @@ class SB3CandidateRunner:
         timesteps: int | dict[str, int] = 100_000,
         evaluations: int = 5,
         notifier: object | None = None,
+        parallel_envs: int = 16,
     ):
+        if evaluations < 1 or parallel_envs < 1:
+            raise ValueError("evaluations and parallel_envs must be positive")
         self.timesteps = timesteps
         self.evaluations = evaluations
         self.notifier = notifier
+        self.parallel_envs = parallel_envs
 
     @staticmethod
-    def _environment(dataset: CandidateDataset, frame: pd.DataFrame) -> BracketTradingEnvV2:
+    def _environment(dataset: CandidateDataset, frame: pd.DataFrame, random_seed: int = 0) -> BracketTradingEnvV2:
         return BracketTradingEnvV2(
             frame,
             dataset.m1_bars,
             list(dataset.feature_columns),
             action_mode={"recurrent_ppo": "ppo", "sac": "sac", "cvar_qrdqn": "qrdqn"}[dataset.algorithm],
             randomize=True,
+            random_seed=random_seed,
         )
 
     def _evaluate(self, model, dataset: CandidateDataset, segments: tuple[pd.DataFrame, ...]) -> tuple[float, ...]:
@@ -180,7 +185,18 @@ class SB3CandidateRunner:
                     self.last = now
                 return True
 
-        factories = [lambda frame=frame: self._environment(dataset, frame) for frame in dataset.training_segments]
+        segments = dataset.training_segments
+        if not segments:
+            raise ValueError("training segments must not be empty")
+        environment_count = (
+            max(len(segments), self.parallel_envs) if dataset.algorithm == "recurrent_ppo" else len(segments)
+        )
+        factories = [
+            lambda frame=segments[index % len(segments)], seed=dataset.seed + index: self._environment(
+                dataset, frame, seed
+            )
+            for index in range(environment_count)
+        ]
         training_env = DummyVecEnv(factories)
         builder = {
             "recurrent_ppo": build_recurrent_ppo,
@@ -193,7 +209,10 @@ class SB3CandidateRunner:
         steps_by_evaluation = tuple(max(1, chunk + (evaluation < remainder)) for evaluation in range(self.evaluations))
         best_score = float("-inf")
         artifact = dataset.output_dir / "best_model"
-        label = f"{dataset.symbol} | {dataset.algorithm} | fold {dataset.fold + 1} | seed {dataset.seed}"
+        label = (
+            f"{dataset.symbol} | {dataset.algorithm} | fold {dataset.fold + 1} | "
+            f"seed {dataset.seed} | {environment_count} envs"
+        )
         started = time.monotonic()
         with tqdm(
             total=sum(steps_by_evaluation),
@@ -224,7 +243,12 @@ class SB3CandidateRunner:
                 if evaluation == 1 or np.isfinite(score) and (not np.isfinite(best_score) or score > best_score):
                     best_score = score
                     model.save(artifact)
-                progress.set_postfix(evaluation=f"{evaluation}/{self.evaluations}", best=f"{best_score:.4f}", **_gpu_postfix())
+                progress.set_postfix(
+                    envs=environment_count,
+                    evaluation=f"{evaluation}/{self.evaluations}",
+                    best=f"{best_score:.4f}",
+                    **_gpu_postfix(),
+                )
         model = model.__class__.load(artifact, env=training_env)
         update = getattr(notifier, "update", None)
         if update:
@@ -241,7 +265,9 @@ class TrainingEngine:
         notifier: object | None = None,
     ):
         self.config = config
-        self.runner = runner or SB3CandidateRunner(config.rl.timesteps, config.rl.evaluations, notifier)
+        self.runner = runner or SB3CandidateRunner(
+            config.rl.timesteps, config.rl.evaluations, notifier, config.rl.recurrent_ppo_envs
+        )
         self.notifier = notifier
 
     @staticmethod
