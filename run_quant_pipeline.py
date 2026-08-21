@@ -142,20 +142,25 @@ def main() -> int:
                     reporting = manifest.pop("_reporting")
                     training_returns = reporting["training"]
                     evaluation_returns = reporting["evaluation"]
+                    monte_carlo_paths = (
+                        config.validation.monte_carlo_paths
+                        if args.profile == "full"
+                        else min(100, config.validation.monte_carlo_paths)
+                    )
                     phase_bar.set_postfix_str("monte carlo")
                     notifier.notify_phase(
                         "Monte Carlo",
                         symbol,
-                        f"train + evaluation | {config.validation.monte_carlo_paths:,} paths each",
+                        f"train + evaluation | {monte_carlo_paths:,} paths each",
                     )
                     training_monte_carlo = moving_block_monte_carlo(
                         training_returns.to_numpy(),
-                        paths=config.validation.monte_carlo_paths,
+                        paths=monte_carlo_paths,
                         block_size=min(24, len(training_returns)),
                     )
                     evaluation_monte_carlo = moving_block_monte_carlo(
                         evaluation_returns.to_numpy(),
-                        paths=config.validation.monte_carlo_paths,
+                        paths=monte_carlo_paths,
                         block_size=min(24, len(evaluation_returns)),
                     )
                     phase_bar.update()

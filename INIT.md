@@ -98,6 +98,8 @@ Full pipeline:
 Smoke pipeline:
 `python.exe .\run_quant_pipeline.py --profile smoke`
 
+Smoke is an ultra-fast structural verification profile: keep the feature, HMM, alpha, validation, reporting, and candidate interfaces active with minimal non-promotable workloads. Its trading performance is not a research result.
+
 Live/paper service:
 `python.exe .\run_live_service.py`
 

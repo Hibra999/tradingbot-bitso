@@ -18,7 +18,7 @@ Put secrets only in `.env` or the process environment. Data, model artifacts, SQ
 
 ## Research
 
-The safe default is a short, non-promotable verification run:
+The safe default is a short, non-promotable verification run. Smoke uses one purged chronological fold, one seed, shorter feature warm-ups, and 100 Monte Carlo paths; its metrics are diagnostic only.
 
 ```bash
 .venv/bin/python run_quant_pipeline.py

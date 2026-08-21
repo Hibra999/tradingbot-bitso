@@ -112,6 +112,26 @@ class _ResearchFold:
     test_groups: tuple[object, ...]
 
 
+def _smoke_research_fold(
+    index: pd.DatetimeIndex,
+    interval_end: pd.DatetimeIndex,
+    *,
+    embargo_bars: int,
+    max_holding_bars: int,
+) -> _ResearchFold:
+    if len(index) < 1_200:
+        raise ValueError("smoke profile requires at least 1,200 complete H1 bars")
+    smoke_embargo = min(embargo_bars, max_holding_bars)
+    outer = CPCVSplitter(2, 1, smoke_embargo, max_holding_bars).split(index, interval_end)[-1]
+    training, validation = internal_purged_validation_tail(
+        outer.train_indices,
+        index,
+        interval_end,
+        embargo_bars=smoke_embargo,
+    )
+    return _ResearchFold(training, validation, outer.episode_segments, tuple(outer.test_groups))
+
+
 @dataclass(frozen=True)
 class CandidateRun:
     returns: tuple[float, ...]
@@ -599,27 +619,14 @@ class TrainingEngine:
             if len(folds) < 2:
                 raise ValueError("full validation requires at least two complete walk-forward folds")
         else:
-            splitter = CPCVSplitter(
-                self.config.validation.temporal_groups,
-                self.config.validation.test_groups,
-                self.config.validation.embargo_bars,
-                holding,
-            )
-            for fold in splitter.split(decision_data.index, interval_end):
-                train_indices, validation_indices = internal_purged_validation_tail(
-                    fold.train_indices,
+            folds.append(
+                _smoke_research_fold(
                     decision_data.index,
                     interval_end,
                     embargo_bars=self.config.validation.embargo_bars,
+                    max_holding_bars=holding,
                 )
-                folds.append(
-                    _ResearchFold(
-                        train_indices,
-                        validation_indices,
-                        fold.episode_segments,
-                        tuple(fold.test_groups),
-                    )
-                )
+            )
         seeds = self.config.validation.full_seeds if self.config.profile == "full" else self.config.validation.smoke_seeds
         algorithms: dict[str, object] = {}
         all_artifacts: list[str] = []
@@ -639,7 +646,11 @@ class TrainingEngine:
             if update:
                 update(f"{symbol} | feature preparation | fold {fold_number + 1}/{len(folds)}")
             train_indices, validation_indices = fold.train_indices, fold.validation_indices
-            pipeline = CausalFeaturePipeline(config_hash=self.config.config_hash, random_state=fold_number)
+            pipeline = CausalFeaturePipeline(
+                config_hash=self.config.config_hash,
+                fracdiff_threshold=1e-5 if self.config.profile == "full" else 1e-3,
+                random_state=fold_number,
+            )
             pipeline.fit(decision_data.iloc[train_indices])
 
             def transformed(indices: np.ndarray, history_indices: np.ndarray) -> pd.DataFrame:
@@ -984,7 +995,11 @@ class TrainingEngine:
             )
             monte_carlo = moving_block_monte_carlo(
                 evaluation.to_numpy(),
-                paths=self.config.validation.monte_carlo_paths,
+                paths=(
+                    self.config.validation.monte_carlo_paths
+                    if self.config.profile == "full"
+                    else min(100, self.config.validation.monte_carlo_paths)
+                ),
                 block_size=min(24, len(evaluation)),
             )
             metrics["ruin_probability_20"] = monte_carlo.ruin_probability_20
@@ -1542,7 +1557,7 @@ class TrainingEngine:
             "trial_ledger": trial_ledger,
             "pbo": pbo,
             "validation_protocol": {
-                "outer": "rolling" if self.config.profile == "full" else "cpcv-smoke",
+                "outer": "rolling" if self.config.profile == "full" else "single-purged-cpcv-smoke",
                 "train_months": self.config.validation.train_months if self.config.profile == "full" else None,
                 "validation_months": self.config.validation.validation_months if self.config.profile == "full" else None,
                 "evaluation_months": self.config.validation.evaluation_months if self.config.profile == "full" else None,
