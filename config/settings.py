@@ -31,6 +31,17 @@ def env_int(name: str, default: int, *, minimum: int = 1) -> int:
     return result
 
 
+def env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
+    value = os.getenv(name)
+    try:
+        result = default if value is None or not value.strip() else float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be numeric") from exc
+    if result < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    return result
+
+
 def env_seeds(name: str, default: int) -> tuple[int, ...]:
     value = os.getenv(name)
     if value is None or not value.strip():
@@ -103,6 +114,10 @@ class ValidationConfig:
     evaluation_months: int = 6
     step_months: int = 6
     holdout_months: int = 6
+    commission_bps: float = 10.0
+    base_spread_bps: float = 2.0
+    stress_spread_multiplier: float = 2.0
+    stress_slippage_atr_fraction: float = 0.02
 
     def __post_init__(self) -> None:
         if not 1 <= self.test_groups < self.temporal_groups:
@@ -117,6 +132,10 @@ class ValidationConfig:
             self.holdout_months,
         ) < 1:
             raise ValueError("walk-forward window lengths must be positive")
+        if self.commission_bps < 0 or self.base_spread_bps < 0:
+            raise ValueError("commission and spread assumptions must be non-negative")
+        if self.stress_spread_multiplier < 1 or self.stress_slippage_atr_fraction < 0:
+            raise ValueError("stress costs must not improve the base scenario")
 
     @classmethod
     def from_env(cls) -> "ValidationConfig":
@@ -131,6 +150,14 @@ class ValidationConfig:
             evaluation_months=env_int("VALIDATION_EVAL_MONTHS", 6),
             step_months=env_int("VALIDATION_STEP_MONTHS", 6),
             holdout_months=env_int("VALIDATION_HOLDOUT_MONTHS", 6),
+            commission_bps=env_float("VALIDATION_COMMISSION_BPS", 10.0),
+            base_spread_bps=env_float("VALIDATION_BASE_SPREAD_BPS", 2.0),
+            stress_spread_multiplier=env_float(
+                "VALIDATION_STRESS_SPREAD_MULTIPLIER", 2.0, minimum=1.0
+            ),
+            stress_slippage_atr_fraction=env_float(
+                "VALIDATION_STRESS_SLIPPAGE_ATR_FRACTION", 0.02
+            ),
         )
 
 

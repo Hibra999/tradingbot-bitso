@@ -4,6 +4,15 @@ import numpy as np
 import pandas as pd
 
 VOLATILITY_WINDOWS = (5, 15, 60, 240, 1_440, 10_080)
+HAR_RV_COLUMNS = (
+    "rv_60m",
+    "rv_240m",
+    "rv_1440m",
+    "rv_10080m",
+    "rv_ratio_60m_240m",
+    "rv_ratio_240m_1440m",
+    "rv_ratio_1440m_10080m",
+)
 _LOG2 = np.log(2.0)
 
 
@@ -57,7 +66,11 @@ def yang_zhang_volatility(frame: pd.DataFrame, window: int = 20) -> pd.Series:
     return np.sqrt(variance.clip(lower=0)).rename(f"yang_zhang_{window}")
 
 
-def add_realized_volatility_features(m1: pd.DataFrame) -> pd.DataFrame:
+def add_realized_volatility_features(
+    m1: pd.DataFrame,
+    *,
+    include_moments: bool = True,
+) -> pd.DataFrame:
     """Add a causal realized-volatility term matrix to close-labelled M1 bars."""
     out = m1.copy()
     log_returns = np.log(out["Close"]).diff()
@@ -66,10 +79,27 @@ def add_realized_volatility_features(m1: pd.DataFrame) -> pd.DataFrame:
         out[f"rv_{window}m"] = np.sqrt(squared.rolling(window).sum())
     for short, long in zip(VOLATILITY_WINDOWS, VOLATILITY_WINDOWS[1:]):
         out[f"rv_ratio_{short}m_{long}m"] = out[f"rv_{short}m"] / out[f"rv_{long}m"].replace(0, np.nan)
-    for window in (60, 240, 1_440):
-        out[f"return_skew_{window}m"] = log_returns.rolling(window).skew()
-        out[f"return_kurt_{window}m"] = log_returns.rolling(window).kurt()
+    if include_moments:
+        for window in (60, 240, 1_440):
+            out[f"return_skew_{window}m"] = log_returns.rolling(window).skew()
+            out[f"return_kurt_{window}m"] = log_returns.rolling(window).kurt()
     return out
+
+
+def align_m1_features_to_decisions(
+    m1_features: pd.DataFrame,
+    decision_index: pd.DatetimeIndex,
+) -> pd.DataFrame:
+    if m1_features.empty or not m1_features.index.is_monotonic_increasing or m1_features.index.has_duplicates:
+        raise ValueError("M1 features must be non-empty, chronological, and unique")
+    if not decision_index.is_monotonic_increasing or decision_index.has_duplicates:
+        raise ValueError("decision timestamps must be chronological and unique")
+    positions = m1_features.index.searchsorted(decision_index, side="right") - 1
+    valid = positions >= 0
+    aligned = pd.DataFrame(index=decision_index, columns=m1_features.columns, dtype=float)
+    if bool(valid.any()):
+        aligned.iloc[np.flatnonzero(valid)] = m1_features.iloc[positions[valid]].to_numpy()
+    return aligned
 
 
 def add_range_volatility_features(frame: pd.DataFrame, window: int = 20) -> pd.DataFrame:

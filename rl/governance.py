@@ -50,6 +50,8 @@ def promotion_gate(
         reasons.append("probability of backtest overfitting must not exceed 10%")
     if metrics.get("excess_return_vs_buy_and_hold", float("-inf")) <= 0:
         reasons.append("net return must exceed buy-and-hold on identical timestamps")
+    if metrics.get("stress_return", float("-inf")) <= 0:
+        reasons.append("stressed execution return must remain positive")
     return not reasons, reasons
 
 

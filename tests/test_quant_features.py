@@ -7,6 +7,7 @@ import pandas as pd
 
 from quant import (
     add_realized_volatility_features,
+    align_m1_features_to_decisions,
     fixed_width_fracdiff,
     fracdiff_weights,
     garman_klass_volatility,
@@ -38,6 +39,11 @@ class QuantFeatureTests(unittest.TestCase):
         self.assertAlmostEqual(float(garman_klass_volatility(bars, 5).iloc[-1]), expected_gk)
         realized = np.sqrt(np.log(close).diff().pow(2).iloc[-5:].sum())
         self.assertAlmostEqual(float(full["rv_5m"].iloc[-1]), realized)
+
+        decisions = pd.DatetimeIndex([bars.index[59] + pd.Timedelta(seconds=30), bars.index[89]])
+        aligned = align_m1_features_to_decisions(full[["rv_5m"]], decisions)
+        self.assertEqual(float(aligned.iloc[0, 0]), float(full["rv_5m"].iloc[59]))
+        self.assertEqual(float(aligned.iloc[1, 0]), float(full["rv_5m"].iloc[89]))
 
         varied = bars.iloc[:8].copy()
         varied["Open"] = varied["Close"].shift().fillna(varied["Close"].iloc[0]) * np.linspace(1, 1.002, 8)

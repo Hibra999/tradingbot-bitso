@@ -29,11 +29,19 @@ class DomainRandomizer:
         self.config = config or PerturbationConfig()
         self.rng = np.random.default_rng(self.seed)
 
-    def perturb(self, features: pd.DataFrame, atr: pd.Series, base_spread: float) -> RandomizedEpisode:
-        if len(features) != len(atr) or base_spread < 0:
+    def perturb(
+        self,
+        features: pd.DataFrame,
+        atr: pd.Series,
+        base_spread: float | np.ndarray | pd.Series,
+    ) -> RandomizedEpisode:
+        spread_base = np.asarray(base_spread, dtype=float)
+        if spread_base.ndim == 0:
+            spread_base = np.full(len(features), float(spread_base))
+        if len(features) != len(atr) or spread_base.shape != (len(features),) or bool((spread_base < 0).any()):
             raise ValueError("features/ATR must align and base_spread must be non-negative")
         cfg = self.config
-        spread = base_spread * self.rng.lognormal(
+        spread = spread_base * self.rng.lognormal(
             mean=-0.5 * cfg.spread_lognormal_sigma**2,
             sigma=cfg.spread_lognormal_sigma,
             size=len(features),

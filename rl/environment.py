@@ -8,7 +8,7 @@ import pandas as pd
 from gymnasium import spaces
 
 from config import RLConfig
-from validation import DomainRandomizer
+from validation import DomainRandomizer, PerturbationConfig
 
 from .actions import _sac_action_values, qrdqn_action_table
 from .execution_core import BracketExecutionCore
@@ -28,10 +28,15 @@ class BracketTradingEnvV2(gym.Env):
         model_id: str = "training",
         randomize: bool = True,
         base_spread: float = 0.0,
+        base_spread_bps: float = 2.0,
+        commission_rate: float = 0.001,
+        perturbation_config: PerturbationConfig | None = None,
         random_seed: int = 0,
         allow_short: bool = False,
     ):
         super().__init__()
+        if base_spread < 0 or base_spread_bps < 0 or commission_rate < 0:
+            raise ValueError("commission and spread assumptions must be non-negative")
         self.decision_bars = decision_bars
         self.m1_bars = m1_bars
         self.feature_columns = feature_columns
@@ -40,9 +45,11 @@ class BracketTradingEnvV2(gym.Env):
         self.model_id = model_id
         self.randomize = randomize
         self.base_spread = base_spread
+        self.base_spread_bps = base_spread_bps
+        self.perturbation_config = perturbation_config
         self.allow_short = allow_short
         self._random_seed = int(random_seed)
-        self.core = BracketExecutionCore(decision_bars, m1_bars)
+        self.core = BracketExecutionCore(decision_bars, m1_bars, commission_rate=commission_rate)
         cfg = RLConfig()
         self._risk_fraction = cfg.risk_fractions[0]
         self._sl_atr_multipliers, self._tp_sl_ratios = cfg.sl_atr_multipliers, cfg.tp_sl_ratios
@@ -69,17 +76,22 @@ class BracketTradingEnvV2(gym.Env):
         self.index = 0
         self.core.reset()  # every disjoint CPCV segment starts flat
         features = self.decision_bars[self.feature_columns]
+        base_spreads = (
+            np.full(len(features), self.base_spread)
+            if self.base_spread > 0
+            else self.decision_bars["Close"].to_numpy(dtype=float) * self.base_spread_bps / 10_000
+        )
         if self.randomize:
             if seed is not None:
                 self._random_seed = int(seed)
-            randomized = DomainRandomizer(self._random_seed).perturb(
-                features, self.decision_bars["atr"], self.base_spread
+            randomized = DomainRandomizer(self._random_seed, self.perturbation_config).perturb(
+                features, self.decision_bars["atr"], base_spreads
             )
             self.episode_features = randomized.features
             self.spreads, self.slippages, self.latencies = randomized.spread, randomized.slippage, randomized.latency_ticks
         else:
             self.episode_features = features
-            self.spreads = np.full(len(features), self.base_spread)
+            self.spreads = base_spreads
             self.slippages = np.zeros(len(features))
             self.latencies = np.ones(len(features), dtype=int)
         self._feature_values = np.nan_to_num(

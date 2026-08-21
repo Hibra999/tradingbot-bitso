@@ -26,6 +26,7 @@ def main() -> int:
 
     from config import AppConfig
     from data import load_alpaca_ohlcv, resample_ohlcv
+    from quant import HAR_RV_COLUMNS, add_realized_volatility_features, align_m1_features_to_decisions
     from rl import CandidateRun, SB3CandidateRunner, TrainingEngine
     from telegram_bot import PipelineNotifier
     from telegram_bot.reports import generate_full_report
@@ -89,6 +90,10 @@ def main() -> int:
                     phase_bar.set_postfix_str("resampling")
                     notifier.notify_phase("Resampling", symbol, f"{len(m1):,} M1 bars")
                     decision = resample_ohlcv(m1, "1h")
+                    realized = add_realized_volatility_features(m1, include_moments=False)
+                    decision = decision.join(
+                        align_m1_features_to_decisions(realized[list(HAR_RV_COLUMNS)], decision.index)
+                    )
                     phase_bar.update()
                     phase_bar.set_postfix_str("training")
                     notifier.notify_phase("Training", symbol, f"{len(decision):,} H1 bars")

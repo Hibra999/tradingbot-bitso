@@ -35,6 +35,8 @@ Full training belongs on the external high-resource machine. This VPS is intende
 
 Research outputs include per-symbol manifests plus separate training and evaluation QuantStats reports. Both reports compare the selected RL checkpoint with buy-and-hold on identical timestamps and include observed/Monte Carlo equity, underwater drawdown, monthly returns, and return distributions. A smoke manifest can never pass promotion.
 
+The H1 state includes a causal M1 realized-volatility term structure at 1h, 4h, 1d, and 7d. Evaluation uses configured commission and spread assumptions, while a separate seeded stress replay adds wider spreads, slippage, latency, and feature noise. The defaults are conservative fallbacks; calibrate them from observed Bitso fees and public market data before treating a full run as deployable.
+
 ## Approval and live safety
 
 Full runs may mark artifacts eligible but never select one. An operator must set `selected_artifact` to one path already listed in `eligible_artifacts`, then set:

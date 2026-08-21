@@ -31,6 +31,7 @@ class GovernanceTests(unittest.TestCase):
             "ruin_probability_20": 0.01,
             "pbo_probability": 0.0,
             "excess_return_vs_buy_and_hold": 0.05,
+            "stress_return": 0.01,
         }
         self.assertFalse(promotion_gate(metrics, profile="smoke")[0])
         self.assertTrue(promotion_gate(metrics, profile="full")[0])

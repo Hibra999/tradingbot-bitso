@@ -15,6 +15,7 @@ from data import make_sliding_folds
 from quant import CausalFeaturePipeline, atr
 from validation import (
     CPCVSplitter,
+    PerturbationConfig,
     SeedHarness,
     institutional_metrics,
     moving_block_monte_carlo,
@@ -81,6 +82,10 @@ class CandidateDataset:
     test_segments: tuple[pd.DataFrame, ...]
     m1_bars: pd.DataFrame
     output_dir: Path
+    commission_rate: float = 0.001
+    base_spread_bps: float = 2.0
+    stress_spread_multiplier: float = 2.0
+    stress_slippage_atr_fraction: float = 0.02
 
 
 @dataclass(frozen=True)
@@ -102,6 +107,8 @@ class CandidateRun:
     benchmark_returns: tuple[float, ...] = ()
     training_benchmark_returns: tuple[float, ...] = ()
     validation_trials: tuple[float, ...] = ()
+    stress_returns: tuple[float, ...] = ()
+    stress_timestamps: tuple[str, ...] = ()
 
 
 def _segment_return_index(segments: tuple[pd.DataFrame, ...]) -> pd.DatetimeIndex:
@@ -145,6 +152,19 @@ def _benchmark_series(
     return benchmark.reindex(strategy.index)
 
 
+def _stress_run_series(result: CandidateRun, segments: tuple[pd.DataFrame, ...]) -> pd.Series:
+    if not result.stress_returns:
+        return _run_series(result, segments)
+    index = (
+        pd.DatetimeIndex(result.stress_timestamps)
+        if result.stress_timestamps
+        else _segment_return_index(segments)
+    )
+    if len(index) != len(result.stress_returns):
+        raise ValueError("stress returns and timestamps must align")
+    return pd.Series(result.stress_returns, index=index, dtype=float).sort_index()
+
+
 class SB3CandidateRunner:
     """External-machine runner; validation selects a checkpoint, tests only score it."""
 
@@ -169,6 +189,7 @@ class SB3CandidateRunner:
         random_seed: int = 0,
         *,
         randomize: bool = True,
+        stress: bool = False,
     ) -> BracketTradingEnvV2:
         return BracketTradingEnvV2(
             frame,
@@ -178,6 +199,13 @@ class SB3CandidateRunner:
             randomize=randomize,
             random_seed=random_seed,
             allow_short=False,
+            commission_rate=dataset.commission_rate,
+            base_spread_bps=dataset.base_spread_bps * (
+                dataset.stress_spread_multiplier if stress else 1.0
+            ),
+            perturbation_config=PerturbationConfig(
+                slippage_atr_fraction=dataset.stress_slippage_atr_fraction
+            ),
         )
 
     @staticmethod
@@ -185,11 +213,26 @@ class SB3CandidateRunner:
         values = [segment["Close"].pct_change().dropna().astype(float) for segment in segments]
         return pd.concat(values).sort_index() if values else pd.Series(dtype=float)
 
-    def _evaluate(self, model, dataset: CandidateDataset, segments: tuple[pd.DataFrame, ...]) -> pd.Series:
+    def _evaluate(
+        self,
+        model,
+        dataset: CandidateDataset,
+        segments: tuple[pd.DataFrame, ...],
+        *,
+        randomize: bool = False,
+        stress: bool = False,
+        seed_offset: int = 0,
+    ) -> pd.Series:
         returns: list[pd.Series] = []
         for number, segment in enumerate(segments, 1):
-            environment = self._environment(dataset, segment, randomize=False)
-            observation, _ = environment.reset(seed=dataset.seed)
+            environment = self._environment(
+                dataset,
+                segment,
+                dataset.seed + seed_offset + number,
+                randomize=randomize,
+                stress=stress,
+            )
+            observation, _ = environment.reset(seed=dataset.seed + seed_offset + number)
             recurrent = RecurrentPolicyRunner(model) if dataset.algorithm == "recurrent_ppo" else None
             values: list[float] = []
             timestamps: list[pd.Timestamp] = []
@@ -331,6 +374,14 @@ class SB3CandidateRunner:
             update(f"{label} | test evaluation")
         training_returns = self._evaluate(model, dataset, dataset.training_segments)
         test_returns = self._evaluate(model, dataset, dataset.test_segments)
+        stress_returns = self._evaluate(
+            model,
+            dataset,
+            dataset.test_segments,
+            randomize=True,
+            stress=True,
+            seed_offset=10_000,
+        )
         return CandidateRun(
             tuple(test_returns.to_numpy()),
             str(artifact.with_suffix(".zip")),
@@ -341,6 +392,8 @@ class SB3CandidateRunner:
             tuple(self._buy_and_hold(dataset.test_segments).reindex(test_returns.index).to_numpy()),
             tuple(self._buy_and_hold(dataset.training_segments).reindex(training_returns.index).to_numpy()),
             tuple(validation_scores),
+            tuple(stress_returns.to_numpy()),
+            tuple(str(value) for value in stress_returns.index),
         )
 
 
@@ -511,10 +564,15 @@ class TrainingEngine:
                         test_segments,
                         m1_data,
                         output_dir,
+                        commission_rate=self.config.validation.commission_bps / 10_000,
+                        base_spread_bps=self.config.validation.base_spread_bps,
+                        stress_spread_multiplier=self.config.validation.stress_spread_multiplier,
+                        stress_slippage_atr_fraction=self.config.validation.stress_slippage_atr_fraction,
                     )
                     output_dir.mkdir(parents=True, exist_ok=True)
                     result = self.runner(dataset)
                     evaluation = _run_series(result, test_segments)
+                    stress = _stress_run_series(result, test_segments)
                     training = _run_series(result, training_segments, training=True)
                     evaluation_benchmark = _benchmark_series(result, evaluation, test_segments)
                     training_benchmark = _benchmark_series(result, training, training_segments, training=True)
@@ -525,9 +583,11 @@ class TrainingEngine:
                         "test_groups": list(fold.test_groups),
                         "validation_score": result.validation_score,
                         "test_sharpe": test_sharpe,
+                        "stress_return": float(np.prod(1 + stress.to_numpy()) - 1),
                         "artifact_path": result.artifact_path,
                         "feature_manifest": feature_manifest,
                         "evaluation": evaluation,
+                        "stress": stress,
                         "training": training,
                         "evaluation_benchmark": evaluation_benchmark,
                         "training_benchmark": training_benchmark,
@@ -544,6 +604,7 @@ class TrainingEngine:
                             "checkpoint_trials": trial_count,
                             "validation_scores": list(result.validation_trials) or [result.validation_score],
                             "evaluation_sharpe": test_sharpe,
+                            "stress_return": candidate["stress_return"],
                             "artifact_path": result.artifact_path,
                         }
                     )
@@ -600,20 +661,26 @@ class TrainingEngine:
                 for seed in seeds
             }
             seed_paths: dict[int, pd.Series] = {}
+            seed_stress_paths: dict[int, pd.Series] = {}
             seed_validation_scores: dict[int, float] = {}
             for seed, items in seed_candidates.items():
                 if self.config.profile == "full":
                     path = pd.concat([item["evaluation"] for item in items]).sort_index()
+                    stress_path = pd.concat([item["stress"] for item in items]).sort_index()
                     if path.index.has_duplicates:
                         raise ValueError("walk-forward evaluation timestamps must not overlap")
+                    if stress_path.index.has_duplicates:
+                        raise ValueError("walk-forward stress timestamps must not overlap")
                     validation_score = float(
                         np.mean([float(item["validation_score"]) for item in items])
                     )
                 else:
                     representative = max(items, key=lambda item: float(item["validation_score"]))
                     path = representative["evaluation"]
+                    stress_path = representative["stress"]
                     validation_score = float(representative["validation_score"])
                 seed_paths[seed] = path
+                seed_stress_paths[seed] = stress_path
                 seed_validation_scores[seed] = validation_score
             selected_seed = max(seed_validation_scores, key=seed_validation_scores.get)
             selected = (
@@ -655,6 +722,9 @@ class TrainingEngine:
             buy_and_hold_return = float(np.prod(1 + evaluation_benchmark.to_numpy()) - 1)
             metrics["buy_and_hold_return"] = buy_and_hold_return
             metrics["excess_return_vs_buy_and_hold"] = strategy_return - buy_and_hold_return
+            metrics["stress_return"] = float(
+                np.prod(1 + seed_stress_paths[selected_seed].to_numpy()) - 1
+            )
             metrics.update(pbo)
             algorithm_eligible, algorithm_reasons = promotion_gate(metrics, profile=self.config.profile)
             if algorithm_eligible and self.config.profile != "full":
@@ -691,6 +761,7 @@ class TrainingEngine:
                         if key
                         not in {
                             "evaluation",
+                            "stress",
                             "training",
                             "evaluation_benchmark",
                             "training_benchmark",
@@ -783,10 +854,15 @@ class TrainingEngine:
                         (final_holdout,),
                         m1_data,
                         output_dir,
+                        commission_rate=self.config.validation.commission_bps / 10_000,
+                        base_spread_bps=self.config.validation.base_spread_bps,
+                        stress_spread_multiplier=self.config.validation.stress_spread_multiplier,
+                        stress_slippage_atr_fraction=self.config.validation.stress_slippage_atr_fraction,
                     )
                     result = self.runner(dataset)
                     training = _run_series(result, dataset.training_segments, training=True)
                     evaluation = _run_series(result, dataset.test_segments)
+                    stress = _stress_run_series(result, dataset.test_segments)
                     training_benchmark = _benchmark_series(
                         result, training, dataset.training_segments, training=True
                     )
@@ -797,9 +873,11 @@ class TrainingEngine:
                             "seed": seed,
                             "validation_score": result.validation_score,
                             "test_sharpe": test_sharpe,
+                            "stress_return": float(np.prod(1 + stress.to_numpy()) - 1),
                             "artifact_path": result.artifact_path,
                             "training": training,
                             "evaluation": evaluation,
+                            "stress": stress,
                             "training_benchmark": training_benchmark,
                             "evaluation_benchmark": evaluation_benchmark,
                             "feature_manifest": final_pipeline.manifest(),
@@ -817,6 +895,7 @@ class TrainingEngine:
                             "checkpoint_trials": checkpoint_trials,
                             "validation_scores": list(result.validation_trials) or [result.validation_score],
                             "evaluation_sharpe": test_sharpe,
+                            "stress_return": float(np.prod(1 + stress.to_numpy()) - 1),
                             "artifact_path": result.artifact_path,
                         }
                     )
@@ -846,6 +925,9 @@ class TrainingEngine:
                         "ruin_probability_30": final_monte_carlo.ruin_probability_30,
                         "buy_and_hold_return": float(
                             np.prod(1 + report_candidate["evaluation_benchmark"].to_numpy()) - 1
+                        ),
+                        "stress_return": float(
+                            np.prod(1 + report_candidate["stress"].to_numpy()) - 1
                         ),
                         **pbo,
                     }
@@ -882,6 +964,7 @@ class TrainingEngine:
                             not in {
                                 "training",
                                 "evaluation",
+                                "stress",
                                 "training_benchmark",
                                 "evaluation_benchmark",
                                 "feature_manifest",
