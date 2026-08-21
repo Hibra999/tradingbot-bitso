@@ -9,6 +9,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
+from quant import ALPHA_FORECAST_COLUMNS
 from rl import LivePolicyRuntime
 
 
@@ -23,10 +24,24 @@ class _Pipeline:
 
 
 class _Model:
-    action_space = SimpleNamespace(shape=(4,))
+    action_space = SimpleNamespace(shape=(1,))
+
+    def __init__(self):
+        self.last_observation = None
 
     def predict(self, observation, deterministic=True):
-        return np.asarray([-0.5, 0.01, 1.5, 2.0], dtype=np.float32), None
+        self.last_observation = observation
+        return np.asarray([0.0], dtype=np.float32), None
+
+
+class _Alpha:
+    feature_order = ("feature",)
+
+    def transform(self, features, *, round_trip_cost):
+        return pd.DataFrame(
+            {column: [0.0] for column in (*ALPHA_FORECAST_COLUMNS, "alpha_target_exposure")},
+            index=features.index,
+        )
 
 
 class RuntimeTests(unittest.TestCase):
@@ -34,12 +49,14 @@ class RuntimeTests(unittest.TestCase):
         manifest = {
             "model_id": "btc-model",
             "artifact_bundle": {
-                "action_contract": "long_flat_spot",
+                "action_contract": "target_exposure_long_cash_v1",
+                "market_context": "binance_public_v1",
                 "algorithm": "sac",
                 "book": "btc_usd",
                 "model_path": "model.zip",
                 "feature_pipeline_path": "features.pkl",
-                "feature_order": ["feature"],
+                "alpha_pipeline_path": "alpha.pkl",
+                "feature_order": ["feature", *ALPHA_FORECAST_COLUMNS],
             },
         }
         decision_index = pd.date_range("2025-01-01", periods=2, freq="h", tz="UTC")
@@ -56,6 +73,8 @@ class RuntimeTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as folder, patch(
             "rl.runtime.CausalFeaturePipeline.load", return_value=_Pipeline()
+        ), patch(
+            "rl.runtime.CausalAlphaEnsemble.load", return_value=_Alpha()
         ), patch.object(LivePolicyRuntime, "_load_model", return_value=_Model()), patch(
             "rl.runtime.write_parquet"
         ), patch.object(LivePolicyRuntime, "_decision_frame", return_value=decision):
@@ -64,10 +83,16 @@ class RuntimeTests(unittest.TestCase):
             result = runtime.on_closed_m1(
                 decision_index[-1],
                 {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5},
+                position_direction=1,
+                position_entry_price=100.0,
+                target_exposure=0.4,
+                unrealized_return=0.02,
             )
         self.assertIsNotNone(result)
         self.assertEqual(result.intent.direction, 0)
         self.assertEqual(result.decision_time, decision_index[-1])
+        self.assertAlmostEqual(float(runtime.model.last_observation[-7]), 0.4)
+        self.assertAlmostEqual(float(runtime.model.last_observation[-5]), 0.02)
 
 
 if __name__ == "__main__":

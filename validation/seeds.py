@@ -20,7 +20,13 @@ def aggregate_seed_results(results: list[Mapping[str, float]]) -> dict[str, dict
             trim = int(np.floor(len(ordered) * 0.25))
             middle = ordered[trim : len(ordered) - trim] if trim else ordered
             rng = np.random.default_rng(0)
-            bootstrap = rng.choice(values, size=(2_000, len(values)), replace=True).mean(axis=1)
+            samples = rng.choice(values, size=(2_000, len(values)), replace=True)
+            ordered_samples = np.sort(samples, axis=1)
+            bootstrap = (
+                ordered_samples[:, trim : len(values) - trim].mean(axis=1)
+                if trim
+                else ordered_samples.mean(axis=1)
+            )
             ci_low, ci_high = np.quantile(bootstrap, [0.025, 0.975])
             output[metric] = {
                 "mean": float(values.mean()),

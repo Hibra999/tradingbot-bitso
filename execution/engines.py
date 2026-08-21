@@ -37,6 +37,7 @@ class TrackedPosition:
     take_profit_price: Decimal
     entry_origin_id: str
     stop_origin_id: str | None = None
+    risk_fraction: Decimal = Decimal("0")
 
     def payload(self) -> dict[str, str | int | None]:
         return {key: str(value) if isinstance(value, Decimal) else value for key, value in asdict(self).items()}
@@ -52,6 +53,7 @@ class TrackedPosition:
             take_profit_price=Decimal(payload["take_profit_price"]),
             entry_origin_id=payload["entry_origin_id"],
             stop_origin_id=payload.get("stop_origin_id"),
+            risk_fraction=Decimal(payload.get("risk_fraction", "0")),
         )
 
 
@@ -151,7 +153,9 @@ class PaperExecutionEngine(BaseExecutionEngine):
             if intent.direction == 0:
                 return await self._close_position()
             if self.position:
-                return None
+                if abs(intent.risk_fraction - self.position.risk_fraction) < self.risk.params.risk_fraction * Decimal("0.10"):
+                    return None
+                await self._close_position("resize")
             levels = self.books[intent.book].levels("asks")
             if not levels:
                 raise InsufficientDepthError("empty ask book")
@@ -172,6 +176,7 @@ class PaperExecutionEngine(BaseExecutionEngine):
                 fill.average_price - stop_distance,
                 fill.average_price + stop_distance * intent.tp_sl_ratio,
                 origin,
+                risk_fraction=intent.risk_fraction,
             )
             self.bracket = Bracket(
                 intent.book,
@@ -270,10 +275,10 @@ class LiveExecutionEngine(BaseExecutionEngine):
             raise RuntimeError("unmanaged existing orders must be reconciled before startup")
         bundle = self.approved_manifest.get("artifact_bundle")
         if (
-            self.approved_manifest.get("schema_version") != 2
+            self.approved_manifest.get("schema_version") != 3
             or not self.approved_manifest.get("selected_artifact")
             or not isinstance(bundle, dict)
-            or bundle.get("action_contract") != "long_flat_spot"
+            or bundle.get("action_contract") != "target_exposure_long_cash_v1"
         ):
             raise RuntimeError("approved model manifest schema is invalid")
         kill_latched = bool((self.journal.get_state("kill_latch") or {}).get("latched", False))
@@ -329,7 +334,11 @@ class LiveExecutionEngine(BaseExecutionEngine):
             if intent.direction == 0:
                 return await self._exit_position("signal")
             if self.position:
-                return None
+                if abs(intent.risk_fraction - self.position.risk_fraction) < self.risk.params.risk_fraction * Decimal("0.10"):
+                    return None
+                await self._exit_position("resize")
+                if self.position:
+                    raise RuntimeError("position resize could not flatten the previous exposure")
             stop_distance = intent.sl_atr_multiplier * atr
             quantity = min(
                 self.risk.params.max_position_usd / reference_price,
@@ -361,6 +370,7 @@ class LiveExecutionEngine(BaseExecutionEngine):
                 Decimal("0"),
                 Decimal("0"),
                 origin,
+                risk_fraction=intent.risk_fraction,
             )
             self.position.stop_price = self._round_trigger(entry_price - intent.direction * stop_distance, intent.direction)
             self.position.take_profit_price = self._round_trigger(

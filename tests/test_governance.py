@@ -31,8 +31,18 @@ class GovernanceTests(unittest.TestCase):
             "ruin_probability_20": 0.01,
             "pbo_probability": 0.0,
             "excess_return_vs_buy_and_hold": 0.05,
+            "excess_return_vs_deterministic_alpha": 0.02,
+            "deterministic_alpha_return": 0.03,
+            "deterministic_alpha_ci95_low": 0.0001,
+            "alpha_diagnostic_pass": True,
+            "alpha_ic_mean": 0.05,
+            "alpha_ic_positive_fraction": 0.8,
             "stress_return": 0.01,
             "bootstrap_mean_ci95_low": 0.0001,
+            "paired_alpha_ci95_low": 0.0001,
+            "paired_volatility_bh_ci95_low": 0.0001,
+            "mcs_90_pass": True,
+            "seed_iqm_return_ci95_low": 0.001,
             "seed_stability_pass": True,
             "profitable_fold_fraction": 0.8,
             "max_fold_profit_share": 0.4,
@@ -43,13 +53,15 @@ class GovernanceTests(unittest.TestCase):
             path = Path(folder) / "manifest.json"
             artifact_path = Path(folder) / "model.zip"
             feature_path = Path(folder) / "features.pkl"
+            alpha_path = Path(folder) / "alpha.pkl"
             artifact_path.write_bytes(b"model")
             feature_path.write_bytes(b"features")
+            alpha_path.write_bytes(b"alpha")
             artifact = str(artifact_path)
             path.write_text(
                 json.dumps(
                     {
-                        "schema_version": 2,
+                        "schema_version": 3,
                         "profile": "full",
                         "eligible": True,
                         "selected_artifact": artifact,
@@ -58,10 +70,12 @@ class GovernanceTests(unittest.TestCase):
                         "artifact_bundle": {
                             "model_path": artifact,
                             "feature_pipeline_path": str(feature_path),
-                            "action_contract": "long_flat_spot",
+                            "alpha_pipeline_path": str(alpha_path),
+                            "action_contract": "target_exposure_long_cash_v1",
                             "sha256": {
                                 "model": file_sha256(artifact_path),
                                 "feature_pipeline": file_sha256(feature_path),
+                                "alpha_pipeline": file_sha256(alpha_path),
                             },
                         },
                     }

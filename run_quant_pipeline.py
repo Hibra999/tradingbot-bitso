@@ -25,7 +25,7 @@ def main() -> int:
     from tqdm import tqdm
 
     from config import AppConfig
-    from data import load_alpaca_ohlcv, resample_ohlcv
+    from data import load_alpaca_ohlcv, load_binance_context, resample_ohlcv
     from quant import HAR_RV_COLUMNS, add_realized_volatility_features, align_m1_features_to_decisions
     from rl import CandidateRun, SB3CandidateRunner, TrainingEngine
     from telegram_bot import PipelineNotifier
@@ -42,11 +42,33 @@ def main() -> int:
     class SmokeRunner:
         def __call__(self, dataset) -> CandidateRun:
             def buy_and_hold(segments):
-                series = [segment["Close"].pct_change().dropna().astype(float) for segment in segments]
+                series = []
+                cost = 2 * dataset.commission_rate + dataset.base_spread_bps / 10_000
+                for segment in segments:
+                    returns = segment["Close"].pct_change().dropna().astype(float)
+                    if len(returns):
+                        returns.iloc[0] -= cost / 2
+                        returns.iloc[-1] -= cost / 2
+                    series.append(returns)
+                return pd.concat(series).sort_index()
+
+            def deterministic(segments):
+                series = []
+                cost = 2 * dataset.commission_rate + dataset.base_spread_bps / 10_000
+                for segment in segments:
+                    exposure = segment[dataset.deterministic_column].astype(float)
+                    market_return = segment["Close"].pct_change().astype(float)
+                    turnover = exposure.diff().abs().fillna(exposure.abs())
+                    returns = exposure.shift() * market_return - turnover.shift() * cost / 2
+                    if len(returns):
+                        returns.iloc[-1] -= exposure.shift().iloc[-1] * cost / 2
+                    series.append(returns.iloc[1:])
                 return pd.concat(series).sort_index()
 
             evaluation = buy_and_hold(dataset.test_segments)
             training = buy_and_hold(dataset.training_segments)
+            evaluation_deterministic = deterministic(dataset.test_segments)
+            training_deterministic = deterministic(dataset.training_segments)
             artifact = dataset.output_dir / "smoke-verification.json"
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_text(json.dumps({"profile": "smoke", "promotable": False}), encoding="utf-8")
@@ -61,6 +83,8 @@ def main() -> int:
                 tuple(evaluation.to_numpy()),
                 tuple(training.to_numpy()),
                 (validation_return,),
+                deterministic_returns=tuple(evaluation_deterministic.to_numpy()),
+                training_deterministic_returns=tuple(training_deterministic.to_numpy()),
             )
 
     runner = (
@@ -83,16 +107,25 @@ def main() -> int:
                         "1min",
                         max_days_for_demo=None if args.profile == "full" else 60,
                         cache_dir=config.data_dir,
-                        timestamp_is_bar_open=False,
+                        timestamp_is_bar_open=True,
                         cache_only=config.cache_only,
                     )
                     phase_bar.update()
                     phase_bar.set_postfix_str("resampling")
                     notifier.notify_phase("Resampling", symbol, f"{len(m1):,} M1 bars")
                     decision = resample_ohlcv(m1, "1h")
+                    decision = decision.loc[decision.index <= m1.index.max().floor("h")]
                     realized = add_realized_volatility_features(m1, include_moments=False)
                     decision = decision.join(
                         align_m1_features_to_decisions(realized[list(HAR_RV_COLUMNS)], decision.index)
+                    )
+                    decision = decision.join(
+                        load_binance_context(
+                            symbol,
+                            decision.index,
+                            cache_dir=config.data_dir,
+                            cache_only=config.cache_only,
+                        )
                     )
                     phase_bar.update()
                     phase_bar.set_postfix_str("training")
@@ -129,6 +162,7 @@ def main() -> int:
                         title=f"{symbol} {args.profile.title()} Training Backtest",
                         symbol=symbol,
                         benchmark=reporting["training_benchmark"],
+                        comparators={"Alpha": reporting["training_deterministic"]},
                     )
                     evaluation_report = generate_full_report(
                         evaluation_returns,
@@ -137,6 +171,10 @@ def main() -> int:
                         title=f"{symbol} {args.profile.title()} Evaluation Backtest",
                         symbol=symbol,
                         benchmark=reporting["evaluation_benchmark"],
+                        comparators={
+                            "Alpha": reporting["evaluation_deterministic"],
+                            "Vol B&H": reporting["evaluation_volatility_benchmark"],
+                        },
                     )
                     for split, report in (("training", training_report), ("evaluation", evaluation_report)):
                         notifier.notify_html(report["telegram_report"])

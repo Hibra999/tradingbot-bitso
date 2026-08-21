@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import combinations
 
 import numpy as np
 from scipy import stats
@@ -163,6 +164,133 @@ def probability_of_backtest_overfitting(
         "pbo_probability": float(np.mean(values <= 0)),
         "pbo_median_logit": float(np.median(values)),
         "pbo_folds": float(len(values)),
+    }
+
+
+def combinatorial_pbo(
+    candidate_returns: np.ndarray | list[list[float]],
+    *,
+    temporal_groups: int = 8,
+) -> dict[str, float]:
+    values = np.asarray(candidate_returns, dtype=float)
+    if values.ndim != 2 or values.shape[1] < 2 or temporal_groups < 4 or temporal_groups % 2:
+        raise ValueError("CSCV PBO needs a return matrix, two candidates, and an even group count >= 4")
+    finite_rows = np.isfinite(values).all(axis=1)
+    values = values[finite_rows]
+    if len(values) < temporal_groups * 2:
+        raise ValueError("CSCV PBO has insufficient complete time observations")
+    groups = tuple(np.asarray(group, dtype=int) for group in np.array_split(np.arange(len(values)), temporal_groups))
+    logits: list[float] = []
+    for selected_groups in combinations(range(temporal_groups), temporal_groups // 2):
+        selected_set = set(selected_groups)
+        in_sample = np.concatenate([groups[index] for index in selected_groups])
+        out_of_sample = np.concatenate(
+            [groups[index] for index in range(temporal_groups) if index not in selected_set]
+        )
+        in_scores = np.asarray(
+            [sharpe_ratio(values[in_sample, column], periods_per_year=1) for column in range(values.shape[1])]
+        )
+        out_scores = np.asarray(
+            [sharpe_ratio(values[out_of_sample, column], periods_per_year=1) for column in range(values.shape[1])]
+        )
+        if not np.isfinite(in_scores).any() or not np.isfinite(out_scores).all():
+            continue
+        selected = int(np.nanargmax(in_scores))
+        rank = float(stats.rankdata(out_scores, method="average")[selected])
+        relative_rank = rank / (values.shape[1] + 1)
+        logits.append(float(np.log(relative_rank / (1 - relative_rank))))
+    if not logits:
+        raise ValueError("CSCV PBO has no finite combinatorial splits")
+    output = np.asarray(logits)
+    return {
+        "pbo_probability": float(np.mean(output <= 0)),
+        "pbo_median_logit": float(np.median(output)),
+        "pbo_folds": float(len(output)),
+    }
+
+
+def paired_block_bootstrap_test(
+    strategy_returns: np.ndarray | list[float],
+    benchmark_returns: np.ndarray | list[float],
+    *,
+    block_size: int = 24,
+    repetitions: int = 2_000,
+    confidence: float = 0.95,
+    seed: int = 0,
+) -> dict[str, float]:
+    strategy = np.asarray(strategy_returns, dtype=float)
+    benchmark = np.asarray(benchmark_returns, dtype=float)
+    if strategy.shape != benchmark.shape or strategy.ndim != 1:
+        raise ValueError("paired returns must be aligned one-dimensional arrays")
+    if not 0 < confidence < 1:
+        raise ValueError("confidence must be in (0, 1)")
+    active = strategy - benchmark
+    active = active[np.isfinite(active)]
+    result = centered_block_bootstrap_test(
+        active,
+        block_size=min(block_size, len(active)),
+        repetitions=repetitions,
+        seed=seed,
+    )
+    rng = np.random.default_rng(seed)
+    count = int(np.ceil(len(active) / min(block_size, len(active))))
+    starts = rng.integers(
+        0,
+        len(active) - min(block_size, len(active)) + 1,
+        size=(repetitions, count),
+    )
+    offsets = np.arange(min(block_size, len(active)))
+    samples = active[(starts[..., None] + offsets).reshape(repetitions, -1)[:, : len(active)]]
+    alpha = (1 - confidence) / 2
+    low, high = np.quantile(samples.mean(axis=1), [alpha, 1 - alpha])
+    return {
+        "mean": result["mean"],
+        "p_value": result["p_value"],
+        "ci_low": float(low),
+        "ci_high": float(high),
+        "confidence": confidence,
+    }
+
+
+def model_confidence_set(
+    candidates: dict[str, np.ndarray | list[float]],
+    *,
+    confidence: float = 0.90,
+    block_size: int = 24,
+    repetitions: int = 2_000,
+    seed: int = 0,
+) -> dict[str, object]:
+    if len(candidates) < 2:
+        raise ValueError("model confidence set requires at least two candidates")
+    names = tuple(candidates)
+    matrix = np.column_stack([np.asarray(candidates[name], dtype=float) for name in names])
+    matrix = matrix[np.isfinite(matrix).all(axis=1)]
+    if len(matrix) < 2:
+        raise ValueError("model confidence set has insufficient aligned returns")
+    best_index = int(np.argmax(matrix.mean(axis=0)))
+    best_name = names[best_index]
+    retained = [best_name]
+    eliminated: list[str] = []
+    comparisons: dict[str, dict[str, float]] = {}
+    for index, name in enumerate(names):
+        if index == best_index:
+            continue
+        comparison = paired_block_bootstrap_test(
+            matrix[:, best_index],
+            matrix[:, index],
+            block_size=block_size,
+            repetitions=repetitions,
+            confidence=confidence,
+            seed=seed + index,
+        )
+        comparisons[name] = comparison
+        (eliminated if comparison["ci_low"] > 0 else retained).append(name)
+    return {
+        "confidence": confidence,
+        "best": best_name,
+        "retained": retained,
+        "eliminated": eliminated,
+        "comparisons": comparisons,
     }
 
 

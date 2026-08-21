@@ -11,6 +11,8 @@ from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDa
 from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
+from .storage import BAR_SCHEMA_VERSION, bar_metadata, read_parquet_metadata, write_parquet
+
 OHLCV = ["Open", "High", "Low", "Close", "Volume"]
 
 # pandas resample rule -> Alpaca TimeFrame.
@@ -131,9 +133,8 @@ def load_alpaca_ohlcv(
         re-downloaded (delta refresh) and merged — repeated runs cost almost
         no API quota.
 timestamp_is_bar_open : optional bool
-        True → Alpaca's bar-OPEN timestamps are shifted forward by one bar so
-        the index is bar-close time (project convention). Default: True for
-        stocks (Alpaca labels those by open), False for crypto (labeled by close).
+        Retained for caller compatibility. Alpaca timestamps every bar by its
+        open time, so all bars are shifted to the canonical close-time index.
     feed : str
         Stock data feed: "iex" (free plan, 15-min delayed) or "sip" (paid,
         real-time consolidated tape). Ignored for crypto.
@@ -146,9 +147,6 @@ timestamp_is_bar_open : optional bool
     symbol = symbol.upper()
     is_crypto = _is_crypto_symbol(symbol)
     api_symbol = f"{symbol[:3]}/{symbol[3:]}" if is_crypto and "/" not in symbol else symbol
-
-    if timestamp_is_bar_open is None:
-        timestamp_is_bar_open = not is_crypto
 
     tf = _pandas_rule_to_timeframe(pandas_rule)
     bar_delta = pd.to_timedelta(pandas_rule)
@@ -175,7 +173,12 @@ timestamp_is_bar_open : optional bool
     if cache_dir is not None:
         cache_path = Path(cache_dir) / f"alpaca_{symbol.replace('/', '_')}_{pandas_rule}.parquet"
         if cache_path.exists():
-            cached = _read_cached_parquet(cache_path)
+            cached = _read_cached_parquet(
+                cache_path,
+                is_crypto=is_crypto,
+                bar_delta=bar_delta,
+                pandas_rule=pandas_rule,
+            )
         if cache_only:
             if cached is None or cached.empty:
                 raise RuntimeError(f"No cached data found for {symbol} ({pandas_rule})")
@@ -255,8 +258,7 @@ timestamp_is_bar_open : optional bool
     df = df.dropna(subset=["Open", "High", "Low", "Close"])
     df["Volume"] = df["Volume"].fillna(0.0)
 
-    if timestamp_is_bar_open:
-        df.index = df.index + bar_delta
+    df.index = df.index + bar_delta
 
     # Merge with the existing cache (tail refresh) and persist the union so
     # the next run only downloads whatever happened after this one.
@@ -266,7 +268,7 @@ timestamp_is_bar_open : optional bool
 
     print(f"Alpaca: cache total {len(df):,} bars ({df.index.min()} -> {df.index.max()}). Saving -> {cache_path}")
     if cache_path is not None:
-        _write_cached_parquet(df, cache_path)
+        _write_cached_parquet(df, cache_path, pandas_rule)
 
     return _slice_range(df, start, end, max_days_for_demo)
 
@@ -283,18 +285,39 @@ def _slice_range(
     return df
 
 
-def _read_cached_parquet(path: Path) -> Optional[pd.DataFrame]:
-    try:
-        df = pd.read_parquet(path, engine="pyarrow")
-        idx = pd.to_datetime(df.index, errors="coerce", utc=True)
-        df = df.loc[~idx.isna()].copy()
-        df.index = pd.DatetimeIndex(idx[~idx.isna()], name="Time")
-        return df[OHLCV].sort_index()
-    except Exception:
-        return None
+def _read_cached_parquet(
+    path: Path,
+    *,
+    is_crypto: bool,
+    bar_delta: pd.Timedelta,
+    pandas_rule: str,
+) -> Optional[pd.DataFrame]:
+    df = pd.read_parquet(path, engine="pyarrow")
+    idx = pd.to_datetime(df.index, errors="coerce", utc=True)
+    df = df.loc[~idx.isna()].copy()
+    df.index = pd.DatetimeIndex(idx[~idx.isna()], name="Time")
+    metadata = read_parquet_metadata(path)
+    schema_version = int(metadata.get("bar_schema_version", 0))
+    if schema_version not in (0, BAR_SCHEMA_VERSION):
+        raise ValueError(f"unsupported cached bar schema: {schema_version}")
+    if schema_version == BAR_SCHEMA_VERSION and metadata.get("bar_timestamp") != "close":
+        raise ValueError("cached bars do not use close timestamps")
+    if schema_version == 0 and is_crypto:
+        df.index = df.index + bar_delta
+    result = df[OHLCV].sort_index()
+    if schema_version == 0:
+        _write_cached_parquet(result, path, pandas_rule, migrated=True)
+    return result
 
 
-def _write_cached_parquet(df: pd.DataFrame, path: Path) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(path, engine="pyarrow", compression="zstd")
+def _write_cached_parquet(
+    df: pd.DataFrame,
+    path: Path,
+    pandas_rule: str,
+    *,
+    migrated: bool = False,
+) -> None:
+    metadata = bar_metadata(source="alpaca", interval=pandas_rule)
+    if migrated:
+        metadata["migrated_from"] = "legacy_alpaca_cache"
+    write_parquet(df, path, metadata)

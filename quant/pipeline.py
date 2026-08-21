@@ -60,13 +60,23 @@ class CausalFeaturePipeline:
             raise RuntimeError("FracDiff parameter is not fitted")
         out = add_range_volatility_features(frame, 20)
         out["log_return"] = np.log(out["Close"]).diff()
+        for horizon in (4, 12, 24, 72, 168):
+            out[f"return_{horizon}h"] = np.log(out["Close"] / out["Close"].shift(horizon))
+        for horizon in (4, 24, 168):
+            out[f"volatility_{horizon}h"] = out["log_return"].rolling(horizon).std(ddof=0)
+        hour = out.index.hour.to_numpy(dtype=float)
+        weekday = out.index.dayofweek.to_numpy(dtype=float)
+        out["utc_hour_sin"] = np.sin(2 * np.pi * hour / 24)
+        out["utc_hour_cos"] = np.cos(2 * np.pi * hour / 24)
+        out["utc_weekday_sin"] = np.sin(2 * np.pi * weekday / 7)
+        out["utc_weekday_cos"] = np.cos(2 * np.pi * weekday / 7)
         out["trend_20"] = np.log(out["Close"] / out["Close"].ewm(span=20, adjust=False).mean())
         out["atr_close"] = atr(out, 14) / out["Close"]
         out["fracdiff_close"] = fixed_width_fracdiff(
             np.log(out["Close"]), self.fracdiff_selection.d, self.fracdiff_threshold
         )
         return out.join(
-            rolling_wavelet_features(np.log(out["Close"]), window=self.wavelet_window, wavelet="db4", level=3)
+            rolling_wavelet_features(out["log_return"], window=self.wavelet_window, wavelet="db4", level=3)
         )
 
     @staticmethod
@@ -79,7 +89,6 @@ class CausalFeaturePipeline:
             "garman_klass_20",
             "yang_zhang_20",
             "fracdiff_close",
-            "wavelet_a3_endpoint",
             "wavelet_d3_energy",
             "wavelet_d2_energy",
             "wavelet_d1_energy",
@@ -87,9 +96,20 @@ class CausalFeaturePipeline:
             "regime_neutral",
             "regime_bull",
         )
+        stationary = tuple(
+            f"return_{horizon}h" for horizon in (4, 12, 24, 72, 168)
+        ) + tuple(
+            f"volatility_{horizon}h" for horizon in (4, 24, 168)
+        ) + (
+            "utc_hour_sin",
+            "utc_hour_cos",
+            "utc_weekday_sin",
+            "utc_weekday_cos",
+        )
         live_excluded = {"obi", "micro_price"}
         realized = tuple(column for column in frame.columns if (column.startswith("rv_") or column.startswith("return_")) and column not in live_excluded)
-        return core + realized
+        context = tuple(column for column in frame.columns if column.startswith("ctx_"))
+        return tuple(dict.fromkeys(core + stationary + realized + context))
 
     def _unscaled(self, frame: pd.DataFrame) -> pd.DataFrame:
         deterministic = self._deterministic(frame)
@@ -134,7 +154,7 @@ class CausalFeaturePipeline:
         if self.fracdiff_selection is None or not self.feature_order:
             raise RuntimeError("pipeline is not fitted")
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "feature_order": list(self.feature_order),
             "fracdiff": asdict(self.fracdiff_selection),
             "scaler": {

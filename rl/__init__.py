@@ -1,4 +1,4 @@
-from .actions import ppo_intent, qrdqn_action_table, qrdqn_intent, sac_intent
+from .actions import ppo_intent, qrdqn_action_table, qrdqn_intent, sac_intent, target_exposure_intent
 from .candidates import (
     CVaRQRDQN,
     RecurrentPolicyRunner,
@@ -49,5 +49,6 @@ __all__ = [
     "qrdqn_action_table",
     "qrdqn_intent",
     "sac_intent",
+    "target_exposure_intent",
     "write_manifest",
 ]

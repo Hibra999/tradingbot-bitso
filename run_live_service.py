@@ -100,25 +100,54 @@ async def serve(args: argparse.Namespace) -> None:
         if not initial_equity:
             usd = (journal.get_state("balances") or {}).get("usd", {})
             initial_equity = Decimal(str(usd.get("available", "0"))) + Decimal(str(usd.get("locked", "0")))
+        policy_peak_equity = initial_equity
 
         backtests = BacktestManager(Path(__file__).resolve().parent)
         controller = DashboardController({engine.mode: engine}, mode=engine.mode, backtest_runner=backtests.run)
         candles: dict[str, dict[str, Any]] = {}
 
         async def execute_policy(closed: dict[str, Any], reference_price: Decimal) -> None:
-            nonlocal policy_failed, policy_position_age
+            nonlocal policy_failed, policy_position_age, policy_peak_equity
             if policy is None or policy_failed or closed["book"] != policy.book:
                 return
             try:
                 close_time = pd.Timestamp(closed["time"] + 60, unit="s", tz="UTC")
+                position = engine.position
+                if position is None:
+                    policy_position_age = 0
                 current_equity = getattr(engine, "equity", initial_equity)
+                unrealized_cash = Decimal("0")
+                target_exposure = 0.0
+                if position:
+                    close_price = Decimal(str(closed["close"]))
+                    unrealized_cash = (
+                        (close_price - position.entry_price) * position.quantity * position.direction
+                    )
+                    target_exposure = min(
+                        float(position.risk_fraction) / policy.max_risk_fraction,
+                        1.0,
+                    )
+                    if isinstance(engine, PaperExecutionEngine):
+                        current_equity += close_price * position.quantity * (Decimal("1") - engine.fee_rate)
+                    else:
+                        current_equity += unrealized_cash
+                policy_peak_equity = max(policy_peak_equity, current_equity)
                 equity_return = float(current_equity / initial_equity - 1) if initial_equity else 0.0
-                decision = policy.on_closed_m1(
+                unrealized_return = float(unrealized_cash / initial_equity) if initial_equity else 0.0
+                equity_drawdown = (
+                    float(current_equity / policy_peak_equity - 1) if policy_peak_equity else 0.0
+                )
+                decision = await asyncio.to_thread(
+                    policy.on_closed_m1,
                     close_time,
                     closed,
-                    position_direction=engine.position.direction if engine.position else 0,
+                    position_direction=position.direction if position else 0,
                     position_age_bars=policy_position_age,
                     equity_return=equity_return,
+                    position_entry_price=float(position.entry_price) if position else 0.0,
+                    equity_drawdown=equity_drawdown,
+                    target_exposure=target_exposure,
+                    unrealized_return=unrealized_return,
                 )
                 if decision is None:
                     return
@@ -134,11 +163,18 @@ async def serve(args: argparse.Namespace) -> None:
                         "status": "pending",
                     },
                 )
+                previous_entry_id = position.entry_origin_id if position else None
                 if isinstance(engine, PaperExecutionEngine):
                     await engine.execute(decision.intent, decision.atr)
                 else:
                     await engine.execute(decision.intent, decision.atr, reference_price)
-                policy_position_age = policy_position_age + 1 if engine.position else 0
+                policy_position_age = (
+                    policy_position_age + 1
+                    if engine.position and engine.position.entry_origin_id == previous_entry_id
+                    else 1
+                    if engine.position
+                    else 0
+                )
                 journal.set_state(
                     state_key,
                     {

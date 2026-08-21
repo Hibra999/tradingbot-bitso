@@ -74,7 +74,7 @@ class BitsoConfig:
 
 @dataclass(frozen=True)
 class RLConfig:
-    algorithms: tuple[str, ...] = ("recurrent_ppo", "sac", "tqc", "cvar_qrdqn")
+    algorithms: tuple[str, ...] = ("recurrent_ppo", "tqc")
     risk_fractions: tuple[float, ...] = (0.005, 0.01, 0.02, 0.03)
     sl_atr_multipliers: tuple[float, ...] = (1.0, 1.5, 2.5, 3.5)
     tp_sl_ratios: tuple[float, ...] = (1.0, 1.5, 2.0, 4.0)
@@ -99,7 +99,11 @@ class RLConfig:
             "cvar_qrdqn": "RL_CVAR_QRDQN",
         }
         return cls(
-            algorithms=tuple(name for name, prefix in names.items() if env_flag(f"{prefix}_ENABLED", True)),
+            algorithms=tuple(
+                name
+                for name, prefix in names.items()
+                if env_flag(f"{prefix}_ENABLED", name in {"recurrent_ppo", "tqc"})
+            ),
             timesteps={name: env_int(f"{prefix}_TIMESTEPS", 100_000) for name, prefix in names.items()},
             evaluations=env_int("RL_EVALUATIONS", 5),
             recurrent_ppo_envs=env_int("RL_RECURRENT_PPO_ENVS", 16),
@@ -112,7 +116,7 @@ class ValidationConfig:
     test_groups: int = 2
     embargo_bars: int = 200
     max_holding_bars: int = 24
-    full_seeds: tuple[int, ...] = (0, 1)
+    full_seeds: tuple[int, ...] = (0, 1, 2, 3, 4)
     smoke_seeds: tuple[int, ...] = (0,)
     monte_carlo_paths: int = 5_000
     train_months: int = 36
@@ -148,7 +152,7 @@ class ValidationConfig:
         return cls(
             temporal_groups=env_int("VALIDATION_TEMPORAL_GROUPS", 3, minimum=2),
             test_groups=env_int("VALIDATION_TEST_GROUPS", 2),
-            full_seeds=env_seeds("VALIDATION_FULL_SEEDS", 2),
+            full_seeds=env_seeds("VALIDATION_FULL_SEEDS", 5),
             embargo_bars=env_int("VALIDATION_EMBARGO_BARS", 200, minimum=0),
             monte_carlo_paths=env_int("VALIDATION_MONTE_CARLO_PATHS", 5_000),
             train_months=env_int("VALIDATION_TRAIN_MONTHS", 36),

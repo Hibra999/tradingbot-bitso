@@ -8,9 +8,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from data import read_parquet, resample_ohlcv, write_parquet
+from data import bar_metadata, load_binance_context, read_parquet, resample_ohlcv, write_parquet
 from execution import TradeIntent
 from quant import (
+    ALPHA_FORECAST_COLUMNS,
+    CausalAlphaEnsemble,
     HAR_RV_COLUMNS,
     CausalFeaturePipeline,
     add_realized_volatility_features,
@@ -19,7 +21,7 @@ from quant import (
     fracdiff_weights,
 )
 
-from .actions import ppo_intent, qrdqn_intent, sac_intent
+from .actions import target_exposure_intent
 from .candidates import CVaRQRDQN, RecurrentPolicyRunner
 
 
@@ -39,8 +41,8 @@ class LivePolicyRuntime:
         minimum_shadow_days: int | None = None,
     ):
         bundle = manifest.get("artifact_bundle")
-        if not isinstance(bundle, dict) or bundle.get("action_contract") != "long_flat_spot":
-            raise PermissionError("live policy requires a complete long/flat artifact bundle")
+        if not isinstance(bundle, dict) or bundle.get("action_contract") != "target_exposure_long_cash_v1":
+            raise PermissionError("live policy requires a target-exposure artifact bundle")
         self.model_id = str(manifest["model_id"])
         self.algorithm = str(bundle["algorithm"])
         self.book = str(bundle["book"])
@@ -48,8 +50,23 @@ class LivePolicyRuntime:
         if self.feature_z_limit <= 0:
             raise PermissionError("feature drift limit must be positive")
         self.pipeline = CausalFeaturePipeline.load(bundle["feature_pipeline_path"])
-        if tuple(bundle.get("feature_order", ())) != self.pipeline.feature_order:
-            raise PermissionError("manifest and feature artifact orders do not match")
+        self.alpha = CausalAlphaEnsemble.load(bundle["alpha_pipeline_path"])
+        expected_order = self.pipeline.feature_order + ALPHA_FORECAST_COLUMNS
+        if tuple(bundle.get("feature_order", ())) != expected_order:
+            raise PermissionError("manifest, feature, and alpha artifact orders do not match")
+        if self.alpha.feature_order != self.pipeline.feature_order:
+            raise PermissionError("alpha artifact expects a different base feature order")
+        self.feature_order = expected_order
+        self.round_trip_cost = (
+            2 * float(bundle.get("commission_bps", 10.0))
+            + float(bundle.get("base_spread_bps", 2.0))
+        ) / 10_000
+        self.max_risk_fraction = float(bundle.get("max_risk_fraction", 0.005))
+        if not 0 < self.max_risk_fraction <= 0.03:
+            raise PermissionError("target-exposure risk fraction is invalid")
+        self.market_context = str(bundle.get("market_context", ""))
+        if self.market_context != "binance_public_v1":
+            raise PermissionError("live policy market context is unavailable")
         if self.pipeline.fracdiff_selection is None:
             raise PermissionError("live feature pipeline must be fitted")
         self.required_h1_bars = max(
@@ -58,7 +75,7 @@ class LivePolicyRuntime:
             168,
         )
         self.minimum_shadow_days = int(
-            bundle.get("minimum_shadow_days", 30)
+            bundle.get("minimum_shadow_days", 90)
             if minimum_shadow_days is None
             else minimum_shadow_days
         )
@@ -77,13 +94,10 @@ class LivePolicyRuntime:
 
     def _validate_action_space(self) -> None:
         action_space = self.model.action_space
-        if self.algorithm == "recurrent_ppo":
-            if tuple(int(value) for value in action_space.nvec) != (2, 4, 4):
-                raise PermissionError("PPO artifact does not use the approved long/flat action space")
-        elif self.algorithm == "cvar_qrdqn":
-            if int(action_space.n) != 65:
-                raise PermissionError("QR-DQN artifact does not use the approved long/flat action space")
-        elif tuple(action_space.shape) != (4,):
+        if self.algorithm == "cvar_qrdqn":
+            if int(action_space.n) != 5:
+                raise PermissionError("QR-DQN artifact does not use the target-exposure ladder")
+        elif tuple(action_space.shape) != (1,):
             raise PermissionError("continuous-control artifact action space is invalid")
 
     def _load_model(self, path: str):
@@ -120,22 +134,30 @@ class LivePolicyRuntime:
         decision = resample_ohlcv(self.m1, "1h")
         decision["atr"] = atr(decision)
         realized = add_realized_volatility_features(self.m1, include_moments=False)
-        return decision.join(
+        decision = decision.join(
             align_m1_features_to_decisions(realized[list(HAR_RV_COLUMNS)], decision.index)
+        )
+        project_symbol = "BTC/USD" if self.book == "btc_usd" else "ETH/USD"
+        return decision.join(
+            load_binance_context(
+                project_symbol,
+                decision.index,
+                cache_dir=self.history_path.parent / f"{self.book}_context",
+                cache_only=False,
+            )
         )
 
     def _action_intent(self, action: Any, timestamp: pd.Timestamp) -> TradeIntent:
-        common = {
-            "model_id": self.model_id,
-            "book": self.book,
-            "timestamp": timestamp.to_pydatetime(),
-            "allow_short": False,
-        }
-        if self.algorithm == "recurrent_ppo":
-            return ppo_intent(action, **common)
-        if self.algorithm in {"sac", "tqc"}:
-            return sac_intent(action, **common)
-        return qrdqn_intent(int(np.asarray(action).item()), **common)
+        if self.algorithm == "cvar_qrdqn":
+            index = int(np.asarray(action).item())
+            action = np.asarray([index / 4], dtype=np.float32)
+        return target_exposure_intent(
+            action,
+            model_id=self.model_id,
+            book=self.book,
+            timestamp=timestamp.to_pydatetime(),
+            max_risk_fraction=self.max_risk_fraction,
+        )
 
     def on_closed_m1(
         self,
@@ -145,6 +167,10 @@ class LivePolicyRuntime:
         position_direction: int = 0,
         position_age_bars: int = 0,
         equity_return: float = 0.0,
+        position_entry_price: float = 0.0,
+        equity_drawdown: float = 0.0,
+        target_exposure: float = 0.0,
+        unrealized_return: float | None = None,
     ) -> PolicyDecision | None:
         if timestamp.tz is None:
             raise ValueError("live M1 timestamps must be timezone-aware")
@@ -162,7 +188,11 @@ class LivePolicyRuntime:
         self.m1 = self.m1.loc[~self.m1.index.duplicated(keep="last")].tail(self.max_m1_bars)
         if timestamp.minute != 0:
             return None
-        write_parquet(self.m1, self.history_path, {"source": "bitso_public_book_midprice"})
+        write_parquet(
+            self.m1,
+            self.history_path,
+            bar_metadata(source="bitso_public_book_midprice", interval="1min"),
+        )
         required_m1 = self.required_m1_bars
         if len(self.m1) < required_m1:
             return None
@@ -176,18 +206,35 @@ class LivePolicyRuntime:
         features = self.pipeline.transform(current, history_context=decision.iloc[:-1])
         if current.index[-1] not in features.index:
             return None
-        feature_values = features.iloc[-1].to_numpy(dtype=np.float32)
+        forecasts = self.alpha.transform(features, round_trip_cost=self.round_trip_cost)
+        combined = features.join(forecasts.loc[:, ALPHA_FORECAST_COLUMNS])
+        feature_values = combined.loc[current.index[-1], self.feature_order].to_numpy(dtype=np.float32)
         if not bool(np.isfinite(feature_values).all()) or float(np.max(np.abs(feature_values))) > self.feature_z_limit:
             raise RuntimeError("live feature drift exceeded the approved artifact limit")
-        observation = np.concatenate(
-            (
-                feature_values,
-                np.asarray(
-                    [position_direction, position_age_bars / 24, equity_return],
-                    dtype=np.float32,
-                ),
-            )
+        close = float(current["Close"].iloc[0])
+        atr_value = max(float(current["atr"].iloc[0]), 1e-12)
+        entry_distance = (
+            (close - position_entry_price) * position_direction / atr_value
+            if position_direction and position_entry_price > 0
+            else 0.0
         )
+        volatility = atr_value / max(close, 1e-12)
+        observed_unrealized = equity_return if unrealized_return is None else unrealized_return
+        state = np.asarray(
+            [
+                target_exposure,
+                entry_distance,
+                observed_unrealized,
+                position_age_bars / 24,
+                equity_drawdown,
+                volatility,
+                self.round_trip_cost,
+            ],
+            dtype=np.float32,
+        )
+        if not 0 <= target_exposure <= 1 or not bool(np.isfinite(state).all()):
+            raise RuntimeError("live risk state is outside the approved observation contract")
+        observation = np.concatenate((feature_values, state))
         action = (
             self.recurrent.predict(observation, deterministic=True)
             if self.recurrent

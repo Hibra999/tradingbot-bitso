@@ -21,6 +21,7 @@ def generate_report(
     destination: str | Path,
     *,
     benchmark: pd.Series | None = None,
+    comparators: dict[str, pd.Series] | None = None,
 ) -> Path:
     values = returns.dropna().astype(float)
     if not isinstance(values.index, pd.DatetimeIndex) or len(values) < 2:
@@ -44,6 +45,14 @@ def generate_report(
             color="#f6c85f",
             linewidth=1.2,
             label="Buy & Hold",
+        )
+    for name, comparator in (comparators or {}).items():
+        comparator_equity = (1 + comparator).cumprod()
+        axes[0, 0].plot(
+            np.arange(1, len(comparator_equity) + 1),
+            comparator_equity,
+            linewidth=1.1,
+            label=name,
         )
     cone = monte_carlo.equity_cone
     axes[0, 0].fill_between(cone.index, cone["p05"], cone["p95"], color="#38d39f", alpha=0.12, label="MC 5-95%")
@@ -149,6 +158,7 @@ def generate_full_report(
     title: str = "Backtesting Report",
     symbol: str = "TOTAL",
     benchmark: pd.Series | None = None,
+    comparators: dict[str, pd.Series] | None = None,
 ) -> dict[str, Any]:
     values = returns.dropna().astype(float)
     if not isinstance(values.index, pd.DatetimeIndex) or len(values) < 2:
@@ -162,11 +172,36 @@ def generate_full_report(
         if len(aligned) < 2:
             raise ValueError("report strategy and benchmark require at least two aligned observations")
         values, benchmark_values = aligned["RL model"], aligned["Buy & Hold"]
+    comparator_values: dict[str, pd.Series] = {}
+    if comparators:
+        candidates = {
+            name: series.dropna().astype(float).rename(name)
+            for name, series in comparators.items()
+        }
+        if any(not isinstance(series.index, pd.DatetimeIndex) for series in candidates.values()):
+            raise ValueError("report comparators require timestamped observations")
+        columns = [values.rename("RL model")]
+        if benchmark_values is not None:
+            columns.append(benchmark_values.rename("Buy & Hold"))
+        columns.extend(candidates.values())
+        aligned = pd.concat(columns, axis=1, join="inner").dropna()
+        if len(aligned) < 2:
+            raise ValueError("report strategies require at least two aligned observations")
+        values = aligned["RL model"]
+        if benchmark_values is not None:
+            benchmark_values = aligned["Buy & Hold"]
+        comparator_values = {name: aligned[name] for name in candidates}
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     graphics = destination.with_suffix(".png")
     text_path, latex_path = destination.with_suffix(".txt"), destination.with_suffix(".tex")
-    generate_report(values, monte_carlo, graphics, benchmark=benchmark_values)
+    generate_report(
+        values,
+        monte_carlo,
+        graphics,
+        benchmark=benchmark_values,
+        comparators=comparator_values,
+    )
     periods = _periods_per_year(values.index)
     array = values.to_numpy()
     metrics = advanced_metrics(array, periods)
@@ -199,6 +234,8 @@ def generate_full_report(
         benchmark_array = benchmark_values.to_numpy(dtype=float)
         benchmark_metrics = advanced_metrics(benchmark_array, periods)
         benchmark_total = float(np.prod(1 + benchmark_array) - 1)
+    for name, comparator in comparator_values.items():
+        report_rows.append(report_row(name, comparator))
     metric_rows = [
         ("Backtesting from", str(values.index[0])),
         ("Backtesting to", str(values.index[-1])),
@@ -243,6 +280,38 @@ def generate_full_report(
             "Monte Carlo ruin 30%": "-",
         }
         comparison_rows = [(name, strategy, benchmark_display[name]) for name, strategy in metric_rows]
+    comparator_metrics: dict[str, dict[str, float]] = {}
+    if comparator_values:
+        names = list(comparator_values)
+        displays: dict[str, dict[str, str]] = {}
+        for name, comparator in comparator_values.items():
+            data = comparator.to_numpy(dtype=float)
+            current_metrics = advanced_metrics(data, periods)
+            comparator_metrics[name] = current_metrics
+            displays[name] = {
+                "Backtesting from": str(comparator.index[0]),
+                "Backtesting to": str(comparator.index[-1]),
+                "Observations": str(len(comparator)),
+                "Total return": _value(float(np.prod(1 + data) - 1), percent=True),
+                "Sharpe": _value(current_metrics["sharpe"]),
+                "Sortino": _value(current_metrics["sortino"]),
+                "Calmar": _value(current_metrics["calmar"]),
+                "SQN": _value(current_metrics["sqn"]),
+                "Profit factor": _value(current_metrics["profit_factor"]),
+                "Expectancy": _value(current_metrics["expectancy"], percent=True),
+                "Expectancy ratio": _value(current_metrics["expectancy_ratio"]),
+                "Win rate": _value(current_metrics["win_rate"], percent=True),
+                "Maximum drawdown": _value(current_metrics["max_drawdown"], percent=True),
+                "Average drawdown": _value(current_metrics["average_drawdown"], percent=True),
+                "Maximum drawdown duration": f"{current_metrics['drawdown_duration_max']:.0f} periods",
+                "Average drawdown duration": f"{current_metrics['drawdown_duration_mean']:.2f} periods",
+                "Monte Carlo ruin 20%": "-",
+                "Monte Carlo ruin 30%": "-",
+            }
+        comparison_rows = [
+            (*row, *(displays[name][row[0]] for name in names)) for row in comparison_rows
+        ]
+        metric_headers = (*metric_headers, *names)
     compact_labels = {
         "Total return": "Return",
         "Sharpe": "Sharpe",
@@ -258,7 +327,10 @@ def generate_full_report(
         for row in comparison_rows
         if row[0] in compact_labels
     ]
-    compact_headers = ("Metric", "RL", "B&H") if benchmark_metrics else ("Metric", "RL")
+    compact_headers = tuple(
+        "RL" if name == "RL model" else "B&H" if name == "Buy & Hold" else name
+        for name in metric_headers
+    )
     telegram_report = _telegram_table(title, compact_headers, compact_rows)
     text_report = "\n\n".join(
         (
@@ -316,4 +388,5 @@ def generate_full_report(
         "telegram_report": telegram_report,
         "metrics": metrics,
         "benchmark_metrics": benchmark_metrics,
+        "comparator_metrics": comparator_metrics,
     }

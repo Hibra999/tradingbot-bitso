@@ -111,6 +111,36 @@ def sac_intent(
     )
 
 
+def target_exposure_intent(
+    action: np.ndarray | list[float] | tuple[float] | float,
+    *,
+    model_id: str,
+    book: str,
+    timestamp: datetime,
+    max_risk_fraction: float = 0.005,
+    no_trade_band: float = 0.10,
+) -> TradeIntent:
+    values = np.asarray(action, dtype=float).reshape(-1)
+    if values.shape != (1,) or not np.isfinite(values[0]) or not 0 <= values[0] <= 1:
+        raise ValueError("target exposure is outside its declared Box")
+    target = float(values[0])
+    if not 0 <= no_trade_band < 1 or not 0 < max_risk_fraction <= 0.03:
+        raise ValueError("invalid target-exposure intent contract")
+    if target < no_trade_band:
+        target = 0.0
+    return _intent(
+        int(target > 0),
+        max_risk_fraction * target,
+        2.0,
+        2.0,
+        model_id=model_id,
+        book=book,
+        timestamp=timestamp,
+        confidence=target,
+        distribution=(1.0 - target, target),
+    )
+
+
 @lru_cache(maxsize=16)
 def _qrdqn_action_table(
     risk_fractions: tuple[float, ...],

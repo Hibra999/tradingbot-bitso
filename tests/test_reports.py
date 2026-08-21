@@ -19,6 +19,7 @@ class ReportTests(unittest.TestCase):
         index = pd.date_range("2025-01-01", periods=48, freq="h", tz="UTC")
         strategy = pd.Series(np.tile([0.002, -0.001], 24), index=index)
         benchmark = pd.Series(np.tile([0.001, -0.0008], 24), index=index)
+        alpha = pd.Series(np.tile([0.0015, -0.0009], 24), index=index)
         monte_carlo = moving_block_monte_carlo(
             strategy.to_numpy(), paths=20, block_size=4, batch_size=5, seed=3
         )
@@ -38,9 +39,11 @@ class ReportTests(unittest.TestCase):
                 title="Evaluation",
                 symbol="BTC/USD",
                 benchmark=benchmark,
+                comparators={"Alpha": alpha},
             )
             self.assertIn("RL model", report["text_report"])
             self.assertIn("Buy & Hold", report["text_report"])
+            self.assertIn("Alpha", report["text_report"])
             self.assertIn("<pre>", report["telegram_report"])
             self.assertIn("B&amp;H", report["telegram_report"])
             self.assertIn("Buy &amp; Hold", report["html"].read_text(encoding="utf-8"))
@@ -48,6 +51,7 @@ class ReportTests(unittest.TestCase):
             self.assertIn(r"\documentclass{article}", latex)
             self.assertIn(r"\resizebox{\textwidth}{!}", latex)
             self.assertIn(r"Buy \& Hold", latex)
+            self.assertIn("Alpha", latex)
             pd.testing.assert_series_equal(captured["returns"], strategy.rename("RL model"))
             pd.testing.assert_series_equal(captured["benchmark"], benchmark.rename("Buy & Hold"))
 

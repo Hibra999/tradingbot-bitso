@@ -12,13 +12,23 @@ from tqdm import tqdm
 
 from config import AppConfig
 from data import make_sliding_folds
-from quant import CausalFeaturePipeline, atr
+from quant import (
+    ALPHA_FORECAST_COLUMNS,
+    ALPHA_TARGET_COLUMN,
+    CausalAlphaEnsemble,
+    CausalFeaturePipeline,
+    atr,
+    forward_return_targets,
+)
 from validation import (
     CPCVSplitter,
     PerturbationConfig,
     SeedHarness,
+    combinatorial_pbo,
     institutional_metrics,
+    model_confidence_set,
     moving_block_monte_carlo,
+    paired_block_bootstrap_test,
     probability_of_backtest_overfitting,
     sharpe_ratio,
 )
@@ -91,6 +101,7 @@ class CandidateDataset:
     base_spread_bps: float = 2.0
     stress_spread_multiplier: float = 2.0
     stress_slippage_atr_fraction: float = 0.02
+    deterministic_column: str = ALPHA_TARGET_COLUMN
 
 
 @dataclass(frozen=True)
@@ -114,6 +125,8 @@ class CandidateRun:
     validation_trials: tuple[float, ...] = ()
     stress_returns: tuple[float, ...] = ()
     stress_timestamps: tuple[str, ...] = ()
+    deterministic_returns: tuple[float, ...] = ()
+    training_deterministic_returns: tuple[float, ...] = ()
 
 
 def _segment_return_index(segments: tuple[pd.DataFrame, ...]) -> pd.DatetimeIndex:
@@ -170,6 +183,60 @@ def _stress_run_series(result: CandidateRun, segments: tuple[pd.DataFrame, ...])
     return pd.Series(result.stress_returns, index=index, dtype=float).sort_index()
 
 
+def _deterministic_series(
+    result: CandidateRun,
+    strategy: pd.Series,
+    segments: tuple[pd.DataFrame, ...],
+    *,
+    training: bool = False,
+) -> pd.Series:
+    returns = result.training_deterministic_returns if training else result.deterministic_returns
+    if returns:
+        if len(returns) != len(strategy):
+            raise ValueError("deterministic baseline and strategy returns must align")
+        return pd.Series(returns, index=strategy.index, dtype=float)
+    return pd.Series(np.zeros(len(strategy)), index=strategy.index, dtype=float)
+
+
+def _certainty_equivalent(strategy: pd.Series, baseline: pd.Series) -> float:
+    aligned = pd.concat((strategy.rename("strategy"), baseline.rename("baseline")), axis=1).dropna()
+    if len(aligned) < 2:
+        return float("-inf")
+    active = aligned["strategy"] - aligned["baseline"]
+    return float((active.mean() - 0.5 * active.var(ddof=1)) * 365 * 24)
+
+
+def _volatility_matched_buy_and_hold(
+    segments: tuple[pd.DataFrame, ...], round_trip_cost: float
+) -> pd.Series:
+    values: list[pd.Series] = []
+    for segment in segments:
+        returns = segment["Close"].pct_change().astype(float)
+        annualized_volatility = returns.rolling(24).std(ddof=0) * np.sqrt(365 * 24)
+        exposure = (0.20 / annualized_volatility.replace(0, np.nan)).clip(0, 1).fillna(0)
+        turnover = exposure.diff().abs().fillna(exposure.abs())
+        result = exposure.shift() * returns - turnover.shift() * round_trip_cost / 2
+        if len(result):
+            result.iloc[-1] -= exposure.shift().iloc[-1] * round_trip_cost / 2
+        values.append(result.iloc[1:])
+    return pd.concat(values).sort_index() if values else pd.Series(dtype=float)
+
+
+def _time_series_momentum(
+    segments: tuple[pd.DataFrame, ...], horizon: int = 24, round_trip_cost: float = 0.0
+) -> pd.Series:
+    values: list[pd.Series] = []
+    for segment in segments:
+        returns = segment["Close"].pct_change().astype(float)
+        exposure = (segment["Close"].pct_change(horizon) > 0).astype(float)
+        turnover = exposure.diff().abs().fillna(exposure.abs())
+        result = exposure.shift() * returns - turnover.shift() * round_trip_cost / 2
+        if len(result):
+            result.iloc[-1] -= exposure.shift().iloc[-1] * round_trip_cost / 2
+        values.append(result.iloc[1:])
+    return pd.concat(values).sort_index() if values else pd.Series(dtype=float)
+
+
 class SB3CandidateRunner:
     """External-machine runner; validation selects a checkpoint, tests only score it."""
 
@@ -209,7 +276,9 @@ class SB3CandidateRunner:
             randomize=randomize,
             random_seed=random_seed,
             allow_short=False,
-            commission_rate=dataset.commission_rate,
+            commission_rate=dataset.commission_rate * (
+                dataset.stress_spread_multiplier if stress else 1.0
+            ),
             base_spread_bps=dataset.base_spread_bps * (
                 dataset.stress_spread_multiplier if stress else 1.0
             ),
@@ -219,8 +288,16 @@ class SB3CandidateRunner:
         )
 
     @staticmethod
-    def _buy_and_hold(segments: tuple[pd.DataFrame, ...]) -> pd.Series:
-        values = [segment["Close"].pct_change().dropna().astype(float) for segment in segments]
+    def _buy_and_hold(
+        segments: tuple[pd.DataFrame, ...], round_trip_cost: float
+    ) -> pd.Series:
+        values = []
+        for segment in segments:
+            returns = segment["Close"].pct_change().dropna().astype(float)
+            if len(returns):
+                returns.iloc[0] -= round_trip_cost / 2
+                returns.iloc[-1] -= round_trip_cost / 2
+            values.append(returns)
         return pd.concat(values).sort_index() if values else pd.Series(dtype=float)
 
     def _evaluate(
@@ -280,6 +357,36 @@ class SB3CandidateRunner:
             returns.append(pd.Series(values, index=pd.DatetimeIndex(timestamps), dtype=float))
         return pd.concat(returns).sort_index() if returns else pd.Series(dtype=float)
 
+    def _evaluate_deterministic(
+        self,
+        dataset: CandidateDataset,
+        segments: tuple[pd.DataFrame, ...],
+        *,
+        stress: bool = False,
+        seed_offset: int = 0,
+    ) -> pd.Series:
+        returns: list[pd.Series] = []
+        for number, segment in enumerate(segments, 1):
+            environment = self._environment(
+                dataset,
+                segment,
+                dataset.seed + seed_offset + number,
+                randomize=stress,
+                stress=stress,
+            )
+            environment.reset(seed=dataset.seed + seed_offset + number)
+            values: list[float] = []
+            timestamps: list[pd.Timestamp] = []
+            previous_equity = environment.core.equity
+            for target in segment[dataset.deterministic_column].iloc[:-1].to_numpy(dtype=float):
+                _, _, _, _, info = environment.step_target(float(target))
+                equity = float(info["equity"])
+                values.append(equity / previous_equity - 1)
+                timestamps.append(segment.index[environment.index])
+                previous_equity = equity
+            returns.append(pd.Series(values, index=pd.DatetimeIndex(timestamps), dtype=float))
+        return pd.concat(returns).sort_index() if returns else pd.Series(dtype=float)
+
     def __call__(self, dataset: CandidateDataset) -> CandidateRun:
         from stable_baselines3.common.callbacks import BaseCallback
         from stable_baselines3.common.vec_env import DummyVecEnv
@@ -332,6 +439,7 @@ class SB3CandidateRunner:
             "cvar_qrdqn": build_cvar_qrdqn,
         }[dataset.algorithm]
         model = builder(training_env, seed=dataset.seed)
+        validation_baseline = self._evaluate_deterministic(dataset, (dataset.validation_segment,))
         total = self.timesteps.get(dataset.algorithm, 100_000) if isinstance(self.timesteps, dict) else self.timesteps
         chunk, remainder = divmod(total, self.evaluations)
         steps_by_evaluation = tuple(max(1, chunk + (evaluation < remainder)) for evaluation in range(self.evaluations))
@@ -368,8 +476,8 @@ class SB3CandidateRunner:
                 if update:
                     update(f"{status} | validation")
                 validation_returns = self._evaluate(model, dataset, (dataset.validation_segment,))
-                score = float(np.prod(1 + validation_returns.to_numpy()) - 1)
-                validation_scores.append(score)
+                score = _certainty_equivalent(validation_returns, validation_baseline)
+                validation_scores.append(sharpe_ratio(validation_returns.dropna().to_numpy()))
                 if evaluation == 1 or np.isfinite(score) and (not np.isfinite(best_score) or score > best_score):
                     best_score = score
                     model.save(artifact)
@@ -385,6 +493,8 @@ class SB3CandidateRunner:
             update(f"{label} | test evaluation")
         training_returns = self._evaluate(model, dataset, dataset.training_segments)
         test_returns = self._evaluate(model, dataset, dataset.test_segments)
+        training_deterministic = self._evaluate_deterministic(dataset, dataset.training_segments)
+        test_deterministic = self._evaluate_deterministic(dataset, dataset.test_segments)
         stress_returns = self._evaluate(
             model,
             dataset,
@@ -400,11 +510,23 @@ class SB3CandidateRunner:
             tuple(str(value) for value in test_returns.index),
             tuple(training_returns.to_numpy()),
             tuple(str(value) for value in training_returns.index),
-            tuple(self._buy_and_hold(dataset.test_segments).reindex(test_returns.index).to_numpy()),
-            tuple(self._buy_and_hold(dataset.training_segments).reindex(training_returns.index).to_numpy()),
+            tuple(
+                self._buy_and_hold(
+                    dataset.test_segments,
+                    2 * dataset.commission_rate + dataset.base_spread_bps / 10_000,
+                ).reindex(test_returns.index).to_numpy()
+            ),
+            tuple(
+                self._buy_and_hold(
+                    dataset.training_segments,
+                    2 * dataset.commission_rate + dataset.base_spread_bps / 10_000,
+                ).reindex(training_returns.index).to_numpy()
+            ),
             tuple(validation_scores),
             tuple(stress_returns.to_numpy()),
             tuple(str(value) for value in stress_returns.index),
+            tuple(test_deterministic.reindex(test_returns.index).to_numpy()),
+            tuple(training_deterministic.reindex(training_returns.index).to_numpy()),
         )
 
 
@@ -435,6 +557,10 @@ class TrainingEngine:
         holding = self.config.validation.max_holding_bars
         end_positions = np.minimum(np.arange(len(decision_data)) + holding, len(decision_data) - 1)
         interval_end = pd.DatetimeIndex(decision_data.index[end_positions])
+        alpha_targets = forward_return_targets(decision_data.index, m1_data)
+        round_trip_cost = (
+            2 * self.config.validation.commission_bps + self.config.validation.base_spread_bps
+        ) / 10_000
         holdout_start: pd.Timestamp | None = None
         holdout_end: pd.Timestamp | None = None
         folds: list[_ResearchFold] = []
@@ -495,6 +621,7 @@ class TrainingEngine:
         eligible_artifacts: list[str] = []
         all_prior = np.arange(len(decision_data))
         prepared = []
+        alpha_trial_ledger: list[dict[str, object]] = []
         preparation_started = time.monotonic()
         for fold_number, fold in tqdm(
             enumerate(folds),
@@ -516,15 +643,57 @@ class TrainingEngine:
                 features = pipeline.transform(raw, history_context=decision_data.iloc[prior])
                 return _attach_scaled_features(raw, features)
 
+            raw_training_segments = tuple(
+                transformed(segment, train_indices) for segment in _contiguous(train_indices)
+            )
+            alpha = CausalAlphaEnsemble(random_state=fold_number).fit(
+                pd.concat(
+                    [segment.loc[:, pipeline.feature_order] for segment in raw_training_segments]
+                ).sort_index(),
+                alpha_targets,
+            )
+
+            def with_alpha(frame: pd.DataFrame) -> pd.DataFrame:
+                forecasts = alpha.transform(
+                    frame.loc[:, pipeline.feature_order], round_trip_cost=round_trip_cost
+                )
+                return frame.join(forecasts).join(alpha_targets.reindex(frame.index))
+
+            alpha_path = (
+                self.config.models_dir
+                / symbol.replace("/", "_")
+                / "features"
+                / f"fold_{fold_number}_alpha.pkl"
+            )
+            alpha.save(alpha_path)
+            feature_order = pipeline.feature_order + ALPHA_FORECAST_COLUMNS
+            feature_manifest = pipeline.manifest()
+            feature_manifest["feature_order"] = list(feature_order)
+            feature_manifest["alpha"] = alpha.manifest()
+            for horizon, experts in alpha.manifest()["experts"].items():
+                for expert in experts:
+                    alpha_trial_ledger.append(
+                        {
+                            "kind": "alpha_expert",
+                            "fold": fold_number,
+                            "horizon_hours": int(horizon),
+                            **expert,
+                        }
+                    )
+
             prepared.append(
                 (
                     fold_number,
                     fold,
-                    pipeline.feature_order,
-                    tuple(transformed(segment, train_indices) for segment in _contiguous(train_indices)),
-                    transformed(validation_indices, train_indices),
-                    tuple(transformed(segment, all_prior) for segment in fold.episode_segments),
-                    pipeline.manifest(),
+                    feature_order,
+                    tuple(with_alpha(segment) for segment in raw_training_segments),
+                    with_alpha(transformed(validation_indices, train_indices)),
+                    tuple(
+                        with_alpha(transformed(segment, all_prior))
+                        for segment in fold.episode_segments
+                    ),
+                    feature_manifest,
+                    str(alpha_path.resolve()),
                 )
             )
             progress = getattr(self.notifier, "progress", None)
@@ -538,7 +707,7 @@ class TrainingEngine:
 
         candidates_by_algorithm: dict[str, list[dict[str, object]]] = {}
         trial_sharpes: list[float] = []
-        trial_ledger: list[dict[str, object]] = []
+        trial_ledger: list[dict[str, object]] = list(alpha_trial_ledger)
         for algorithm in tqdm(
             self.config.rl.algorithms,
             desc=f"{symbol} algorithms",
@@ -560,6 +729,7 @@ class TrainingEngine:
                 validation_segment,
                 test_segments,
                 feature_manifest,
+                alpha_artifact_path,
             ) in prepared:
                 for seed in seeds:
                     jobs.set_postfix(fold=f"{fold_number + 1}/{len(folds)}", seed=seed)
@@ -587,7 +757,31 @@ class TrainingEngine:
                     training = _run_series(result, training_segments, training=True)
                     evaluation_benchmark = _benchmark_series(result, evaluation, test_segments)
                     training_benchmark = _benchmark_series(result, training, training_segments, training=True)
+                    evaluation_deterministic = _deterministic_series(result, evaluation, test_segments)
+                    training_deterministic = _deterministic_series(
+                        result, training, training_segments, training=True
+                    )
+                    evaluation_volatility_benchmark = _volatility_matched_buy_and_hold(
+                        test_segments, round_trip_cost
+                    ).reindex(evaluation.index)
+                    evaluation_momentum = {
+                        str(horizon): _time_series_momentum(
+                            test_segments, horizon, round_trip_cost
+                        ).reindex(evaluation.index)
+                        for horizon in (12, 24, 168)
+                    }
                     test_sharpe = sharpe_ratio(evaluation.to_numpy()) if len(evaluation) > 1 else float("nan")
+                    alpha_pairs = pd.concat(
+                        [
+                            segment[["alpha_mean_12h", "target_12h"]]
+                            for segment in test_segments
+                        ]
+                    ).dropna()
+                    alpha_ic = float(
+                        alpha_pairs["alpha_mean_12h"].corr(
+                            alpha_pairs["target_12h"], method="spearman"
+                        )
+                    )
                     artifact_path = str(Path(result.artifact_path).resolve())
                     candidate = {
                         "fold": fold_number,
@@ -595,19 +789,31 @@ class TrainingEngine:
                         "test_groups": list(fold.test_groups),
                         "validation_score": result.validation_score,
                         "test_sharpe": test_sharpe,
+                        "alpha_ic_12h": alpha_ic,
                         "stress_return": float(np.prod(1 + stress.to_numpy()) - 1),
                         "artifact_path": artifact_path,
                         "feature_manifest": feature_manifest,
+                        "alpha_artifact_path": alpha_artifact_path,
                         "evaluation": evaluation,
                         "stress": stress,
                         "training": training,
                         "evaluation_benchmark": evaluation_benchmark,
                         "training_benchmark": training_benchmark,
+                        "evaluation_deterministic": evaluation_deterministic,
+                        "training_deterministic": training_deterministic,
+                        "evaluation_volatility_benchmark": evaluation_volatility_benchmark,
+                        "evaluation_momentum": evaluation_momentum,
                     }
                     candidates.append(candidate)
                     all_artifacts.append(artifact_path)
                     trial_count = max(1, len(result.validation_trials))
-                    trial_sharpes.extend([test_sharpe] * trial_count)
+                    finite_trials = [
+                        float(value) for value in result.validation_trials if np.isfinite(value)
+                    ]
+                    if finite_trials:
+                        trial_sharpes.extend(finite_trials)
+                    elif np.isfinite(result.validation_score):
+                        trial_sharpes.append(float(result.validation_score))
                     trial_ledger.append(
                         {
                             "algorithm": algorithm,
@@ -657,11 +863,29 @@ class TrainingEngine:
                 for fold_number in range(len(folds))
             ]
         )
-        pbo = (
-            probability_of_backtest_overfitting(selection_matrix, evaluation_matrix)
-            if len(configurations) >= 2 and len(folds) >= 2
-            else {"pbo_probability": 1.0, "pbo_median_logit": float("nan"), "pbo_folds": 0.0}
-        )
+        if self.config.profile == "full" and len(configurations) >= 2:
+            configuration_paths = []
+            for algorithm, seed in configurations:
+                path = pd.concat(
+                    [
+                        candidate["evaluation"]
+                        for candidate in sorted(
+                            candidates_by_algorithm[algorithm], key=lambda item: int(item["fold"])
+                        )
+                        if candidate["seed"] == seed
+                    ]
+                ).sort_index()
+                if path.index.has_duplicates:
+                    raise ValueError("CSCV candidate return paths must not overlap")
+                configuration_paths.append(path.rename(f"{algorithm}:{seed}"))
+            return_matrix = pd.concat(configuration_paths, axis=1, join="inner").dropna()
+            pbo = combinatorial_pbo(return_matrix.to_numpy())
+        else:
+            pbo = (
+                probability_of_backtest_overfitting(selection_matrix, evaluation_matrix)
+                if len(configurations) >= 2 and len(folds) >= 2
+                else {"pbo_probability": 1.0, "pbo_median_logit": float("nan"), "pbo_folds": 0.0}
+            )
 
         report_candidates: list[dict[str, object]] = []
         for algorithm, candidates in candidates_by_algorithm.items():
@@ -674,11 +898,15 @@ class TrainingEngine:
             }
             seed_paths: dict[int, pd.Series] = {}
             seed_stress_paths: dict[int, pd.Series] = {}
+            seed_deterministic_paths: dict[int, pd.Series] = {}
             seed_validation_scores: dict[int, float] = {}
             for seed, items in seed_candidates.items():
                 if self.config.profile == "full":
                     path = pd.concat([item["evaluation"] for item in items]).sort_index()
                     stress_path = pd.concat([item["stress"] for item in items]).sort_index()
+                    deterministic_path = pd.concat(
+                        [item["evaluation_deterministic"] for item in items]
+                    ).sort_index()
                     if path.index.has_duplicates:
                         raise ValueError("walk-forward evaluation timestamps must not overlap")
                     if stress_path.index.has_duplicates:
@@ -690,9 +918,11 @@ class TrainingEngine:
                     representative = max(items, key=lambda item: float(item["validation_score"]))
                     path = representative["evaluation"]
                     stress_path = representative["stress"]
+                    deterministic_path = representative["evaluation_deterministic"]
                     validation_score = float(representative["validation_score"])
                 seed_paths[seed] = path
                 seed_stress_paths[seed] = stress_path
+                seed_deterministic_paths[seed] = deterministic_path
                 seed_validation_scores[seed] = validation_score
             selected_seed = max(seed_validation_scores, key=seed_validation_scores.get)
             selected = (
@@ -711,6 +941,30 @@ class TrainingEngine:
                 if self.config.profile == "full"
                 else selected["evaluation_benchmark"]
             )
+            evaluation_deterministic = seed_deterministic_paths[selected_seed]
+            evaluation_volatility_benchmark = (
+                pd.concat(
+                    [
+                        item["evaluation_volatility_benchmark"]
+                        for item in seed_candidates[selected_seed]
+                    ]
+                ).sort_index()
+                if self.config.profile == "full"
+                else selected["evaluation_volatility_benchmark"]
+            )
+            evaluation_momentum = {
+                str(horizon): (
+                    pd.concat(
+                        [
+                            item["evaluation_momentum"][str(horizon)]
+                            for item in seed_candidates[selected_seed]
+                        ]
+                    ).sort_index()
+                    if self.config.profile == "full"
+                    else selected["evaluation_momentum"][str(horizon)]
+                )
+                for horizon in (12, 24, 168)
+            }
             metrics = institutional_metrics(
                 evaluation.to_numpy(),
                 trial_sharpes=trial_sharpes,
@@ -734,6 +988,61 @@ class TrainingEngine:
             buy_and_hold_return = float(np.prod(1 + evaluation_benchmark.to_numpy()) - 1)
             metrics["buy_and_hold_return"] = buy_and_hold_return
             metrics["excess_return_vs_buy_and_hold"] = strategy_return - buy_and_hold_return
+            deterministic_return = float(
+                np.prod(1 + evaluation_deterministic.to_numpy()) - 1
+            )
+            metrics["deterministic_alpha_return"] = deterministic_return
+            metrics["excess_return_vs_deterministic_alpha"] = strategy_return - deterministic_return
+            alpha_cash_test = paired_block_bootstrap_test(
+                evaluation_deterministic.to_numpy(),
+                np.zeros(len(evaluation_deterministic)),
+                repetitions=2_000 if self.config.profile == "full" else 100,
+                seed=4,
+            )
+            metrics["deterministic_alpha_ci95_low"] = alpha_cash_test["ci_low"]
+            metrics["alpha_diagnostic_pass"] = all(
+                bool(item["feature_manifest"]["alpha"]["diagnostic_pass"])
+                for item in candidates
+            )
+            fold_alpha_ic = np.asarray(
+                [float(item["alpha_ic_12h"]) for item in seed_candidates[selected_seed]]
+            )
+            metrics["alpha_ic_mean"] = float(np.nanmean(fold_alpha_ic))
+            metrics["alpha_ic_positive_fraction"] = float(np.mean(fold_alpha_ic > 0))
+            metrics["volatility_matched_buy_and_hold_return"] = float(
+                np.prod(1 + evaluation_volatility_benchmark.dropna().to_numpy()) - 1
+            )
+            for horizon, momentum in evaluation_momentum.items():
+                metrics[f"momentum_{horizon}h_return"] = float(
+                    np.prod(1 + momentum.dropna().to_numpy()) - 1
+                )
+            alpha_test = paired_block_bootstrap_test(
+                evaluation.to_numpy(),
+                evaluation_deterministic.reindex(evaluation.index).to_numpy(),
+                repetitions=2_000 if self.config.profile == "full" else 100,
+            )
+            volatility_test = paired_block_bootstrap_test(
+                evaluation.to_numpy(),
+                evaluation_volatility_benchmark.reindex(evaluation.index).to_numpy(),
+                repetitions=2_000 if self.config.profile == "full" else 100,
+                seed=1,
+            )
+            confidence_set = model_confidence_set(
+                {
+                    "RL": evaluation.to_numpy(),
+                    "Alpha": evaluation_deterministic.reindex(evaluation.index).to_numpy(),
+                    "Vol B&H": evaluation_volatility_benchmark.reindex(evaluation.index).to_numpy(),
+                },
+                repetitions=2_000 if self.config.profile == "full" else 100,
+                seed=2,
+            )
+            metrics["paired_alpha_ci95_low"] = alpha_test["ci_low"]
+            metrics["paired_volatility_bh_ci95_low"] = volatility_test["ci_low"]
+            metrics["mcs_90_pass"] = bool(
+                confidence_set["retained"] == ["RL"]
+                and set(confidence_set["eliminated"]) == {"Alpha", "Vol B&H"}
+            )
+            metrics["model_confidence_set"] = confidence_set
             metrics["stress_return"] = float(
                 np.prod(1 + seed_stress_paths[selected_seed].to_numpy()) - 1
             )
@@ -751,6 +1060,9 @@ class TrainingEngine:
                 else 1.0
             )
             metrics["seed_stability_pass"] = seed_evaluation.sri_pass
+            metrics["seed_iqm_return_ci95_low"] = seed_evaluation.aggregate.get(
+                "return", {}
+            ).get("ci95_low", float("-inf"))
             metrics.update(pbo)
             algorithm_eligible, algorithm_reasons = promotion_gate(metrics, profile=self.config.profile)
             if algorithm_eligible and self.config.profile != "full":
@@ -769,6 +1081,9 @@ class TrainingEngine:
                     "validation_score": seed_validation_scores[selected_seed],
                     "evaluation": evaluation,
                     "evaluation_benchmark": evaluation_benchmark,
+                    "evaluation_deterministic": evaluation_deterministic,
+                    "evaluation_volatility_benchmark": evaluation_volatility_benchmark,
+                    "evaluation_momentum": evaluation_momentum,
                     "selected_seed": selected_seed,
                 }
             )
@@ -777,7 +1092,7 @@ class TrainingEngine:
                 "development_eligible": algorithm_eligible,
                 "gate_reasons": algorithm_reasons,
                 "selected_artifact": selected["artifact_path"] if self.config.profile != "full" else None,
-                "selection_rule": "highest mean validation return across chronological folds",
+                "selection_rule": "highest mean validation certainty-equivalent versus deterministic alpha",
                 "selected_seed": selected_seed,
                 "development_evaluation_range": [str(evaluation.index.min()), str(evaluation.index.max())],
                 "fold_results": [
@@ -791,7 +1106,12 @@ class TrainingEngine:
                             "training",
                             "evaluation_benchmark",
                             "training_benchmark",
+                            "evaluation_deterministic",
+                            "training_deterministic",
+                            "evaluation_volatility_benchmark",
+                            "evaluation_momentum",
                             "feature_manifest",
+                            "alpha_artifact_path",
                         }
                     }
                     for candidate in candidates
@@ -854,11 +1174,37 @@ class TrainingEngine:
                     features = final_pipeline.transform(raw, history_context=decision_data.iloc[prior])
                     return _attach_scaled_features(raw, features)
 
-                final_training = final_transformed(final_train_indices, final_train_indices)
-                final_validation = final_transformed(final_validation_indices, final_train_indices)
-                final_holdout = final_transformed(final_holdout_indices, all_prior)
+                final_training_raw = final_transformed(final_train_indices, final_train_indices)
+                final_alpha = CausalAlphaEnsemble(
+                    random_state=int(development_champion["selected_seed"])
+                ).fit(
+                    final_training_raw.loc[:, final_pipeline.feature_order],
+                    alpha_targets,
+                )
+
+                def with_final_alpha(frame: pd.DataFrame) -> pd.DataFrame:
+                    return frame.join(
+                        final_alpha.transform(
+                            frame.loc[:, final_pipeline.feature_order],
+                            round_trip_cost=round_trip_cost,
+                        )
+                    ).join(alpha_targets.reindex(frame.index))
+
+                final_training = with_final_alpha(final_training_raw)
+                final_validation = with_final_alpha(
+                    final_transformed(final_validation_indices, final_train_indices)
+                )
+                final_holdout = with_final_alpha(
+                    final_transformed(final_holdout_indices, all_prior)
+                )
                 feature_path = self.config.models_dir / symbol.replace("/", "_") / "final" / "features.pkl"
+                alpha_path = self.config.models_dir / symbol.replace("/", "_") / "final" / "alpha.pkl"
                 final_pipeline.save(feature_path)
+                final_alpha.save(alpha_path)
+                final_feature_order = final_pipeline.feature_order + ALPHA_FORECAST_COLUMNS
+                final_feature_manifest = final_pipeline.manifest()
+                final_feature_manifest["feature_order"] = list(final_feature_order)
+                final_feature_manifest["alpha"] = final_alpha.manifest()
                 final_candidates: list[dict[str, object]] = []
                 for seed in seeds:
                     output_dir = (
@@ -874,7 +1220,7 @@ class TrainingEngine:
                         champion_algorithm,
                         seed,
                         len(folds),
-                        final_pipeline.feature_order,
+                        final_feature_order,
                         (final_training,),
                         final_validation,
                         (final_holdout,),
@@ -893,13 +1239,29 @@ class TrainingEngine:
                         result, training, dataset.training_segments, training=True
                     )
                     evaluation_benchmark = _benchmark_series(result, evaluation, dataset.test_segments)
+                    training_deterministic = _deterministic_series(
+                        result, training, dataset.training_segments, training=True
+                    )
+                    evaluation_deterministic = _deterministic_series(
+                        result, evaluation, dataset.test_segments
+                    )
+                    evaluation_volatility_benchmark = _volatility_matched_buy_and_hold(
+                        dataset.test_segments, round_trip_cost
+                    ).reindex(evaluation.index)
                     test_sharpe = sharpe_ratio(evaluation.to_numpy())
+                    alpha_pairs = final_holdout[["alpha_mean_12h", "target_12h"]].dropna()
+                    alpha_ic = float(
+                        alpha_pairs["alpha_mean_12h"].corr(
+                            alpha_pairs["target_12h"], method="spearman"
+                        )
+                    )
                     artifact_path = str(Path(result.artifact_path).resolve())
                     final_candidates.append(
                         {
                             "seed": seed,
                             "validation_score": result.validation_score,
                             "test_sharpe": test_sharpe,
+                            "alpha_ic_12h": alpha_ic,
                             "stress_return": float(np.prod(1 + stress.to_numpy()) - 1),
                             "artifact_path": artifact_path,
                             "training": training,
@@ -907,13 +1269,23 @@ class TrainingEngine:
                             "stress": stress,
                             "training_benchmark": training_benchmark,
                             "evaluation_benchmark": evaluation_benchmark,
-                            "feature_manifest": final_pipeline.manifest(),
+                            "training_deterministic": training_deterministic,
+                            "evaluation_deterministic": evaluation_deterministic,
+                            "evaluation_volatility_benchmark": evaluation_volatility_benchmark,
+                            "feature_manifest": final_feature_manifest,
                             "feature_artifact_path": str(feature_path.resolve()),
+                            "alpha_artifact_path": str(alpha_path.resolve()),
                         }
                     )
                     all_artifacts.append(artifact_path)
                     checkpoint_trials = max(1, len(result.validation_trials))
-                    trial_sharpes.extend([test_sharpe] * checkpoint_trials)
+                    finite_trials = [
+                        float(value) for value in result.validation_trials if np.isfinite(value)
+                    ]
+                    if finite_trials:
+                        trial_sharpes.extend(finite_trials)
+                    elif np.isfinite(result.validation_score):
+                        trial_sharpes.append(float(result.validation_score))
                     trial_ledger.append(
                         {
                             "algorithm": champion_algorithm,
@@ -936,6 +1308,28 @@ class TrainingEngine:
                     "fold": "sealed_holdout",
                 }
                 holdout_returns = report_candidate["evaluation"]
+                holdout_seed_evaluation = SeedHarness(seeds).run(
+                    lambda seed: {
+                        "sharpe": sharpe_ratio(
+                            next(
+                                item["evaluation"]
+                                for item in final_candidates
+                                if item["seed"] == seed
+                            ).to_numpy()
+                        ),
+                        "return": float(
+                            np.prod(
+                                1
+                                + next(
+                                    item["evaluation"]
+                                    for item in final_candidates
+                                    if item["seed"] == seed
+                                ).to_numpy()
+                            )
+                            - 1
+                        ),
+                    }
+                )
                 final_metrics = institutional_metrics(
                     holdout_returns.to_numpy(),
                     trial_sharpes=trial_sharpes,
@@ -956,13 +1350,74 @@ class TrainingEngine:
                         "stress_return": float(
                             np.prod(1 + report_candidate["stress"].to_numpy()) - 1
                         ),
+                        "deterministic_alpha_return": float(
+                            np.prod(1 + report_candidate["evaluation_deterministic"].to_numpy()) - 1
+                        ),
                         **pbo,
                     }
                 )
                 final_metrics["excess_return_vs_buy_and_hold"] = float(
                     np.prod(1 + holdout_returns.to_numpy()) - 1
                 ) - final_metrics["buy_and_hold_return"]
+                final_metrics["excess_return_vs_deterministic_alpha"] = float(
+                    np.prod(1 + holdout_returns.to_numpy()) - 1
+                ) - final_metrics["deterministic_alpha_return"]
+                final_alpha_cash_test = paired_block_bootstrap_test(
+                    report_candidate["evaluation_deterministic"].to_numpy(),
+                    np.zeros(len(report_candidate["evaluation_deterministic"])),
+                    seed=4,
+                )
+                final_metrics["deterministic_alpha_ci95_low"] = final_alpha_cash_test[
+                    "ci_low"
+                ]
+                final_metrics["alpha_diagnostic_pass"] = bool(
+                    report_candidate["feature_manifest"]["alpha"]["diagnostic_pass"]
+                )
                 development_metrics = algorithms[champion_algorithm]["metrics"]
+                final_metrics["alpha_ic_mean"] = float(report_candidate["alpha_ic_12h"])
+                final_metrics["alpha_ic_positive_fraction"] = development_metrics[
+                    "alpha_ic_positive_fraction"
+                ]
+                final_alpha_test = paired_block_bootstrap_test(
+                    holdout_returns.to_numpy(),
+                    report_candidate["evaluation_deterministic"].reindex(
+                        holdout_returns.index
+                    ).to_numpy(),
+                )
+                final_volatility_test = paired_block_bootstrap_test(
+                    holdout_returns.to_numpy(),
+                    report_candidate["evaluation_volatility_benchmark"].reindex(
+                        holdout_returns.index
+                    ).to_numpy(),
+                    seed=1,
+                )
+                final_confidence_set = model_confidence_set(
+                    {
+                        "RL": holdout_returns.to_numpy(),
+                        "Alpha": report_candidate["evaluation_deterministic"].reindex(
+                            holdout_returns.index
+                        ).to_numpy(),
+                        "Vol B&H": report_candidate[
+                            "evaluation_volatility_benchmark"
+                        ].reindex(holdout_returns.index).to_numpy(),
+                    },
+                    seed=2,
+                )
+                final_metrics.update(
+                    {
+                        "paired_alpha_ci95_low": final_alpha_test["ci_low"],
+                        "paired_volatility_bh_ci95_low": final_volatility_test["ci_low"],
+                        "mcs_90_pass": bool(
+                            final_confidence_set["retained"] == ["RL"]
+                            and set(final_confidence_set["eliminated"])
+                            == {"Alpha", "Vol B&H"}
+                        ),
+                        "model_confidence_set": final_confidence_set,
+                        "seed_iqm_return_ci95_low": holdout_seed_evaluation.aggregate.get(
+                            "return", {}
+                        ).get("ci95_low", float("-inf")),
+                    }
+                )
                 for metric in (
                     "profitable_fold_fraction",
                     "max_fold_profit_share",
@@ -983,6 +1438,7 @@ class TrainingEngine:
                     "selected_seed": report_candidate["seed"],
                     "selected_artifact": report_candidate["artifact_path"],
                     "feature_artifact_path": str(feature_path.resolve()),
+                    "alpha_artifact_path": str(alpha_path.resolve()),
                     "training_range": [
                         str(report_candidate["training"].index.min()),
                         str(report_candidate["training"].index.max()),
@@ -1001,7 +1457,12 @@ class TrainingEngine:
                                 "stress",
                                 "training_benchmark",
                                 "evaluation_benchmark",
+                                "training_deterministic",
+                                "evaluation_deterministic",
+                                "evaluation_volatility_benchmark",
                                 "feature_manifest",
+                                "feature_artifact_path",
+                                "alpha_artifact_path",
                             }
                         }
                         for candidate in final_candidates
@@ -1024,27 +1485,33 @@ class TrainingEngine:
         if final_evaluation is not None:
             model_path = Path(str(report_candidate["artifact_path"])).resolve()
             feature_artifact = Path(str(report_candidate["feature_artifact_path"])).resolve()
+            alpha_artifact = Path(str(report_candidate["alpha_artifact_path"])).resolve()
             artifact_bundle = {
                 "model_path": str(model_path),
                 "feature_pipeline_path": str(feature_artifact),
+                "alpha_pipeline_path": str(alpha_artifact),
                 "algorithm": report_candidate["algorithm"],
                 "symbol": symbol,
                 "book": symbol.lower().replace("/", "_"),
                 "feature_order": list(report_candidate["feature_manifest"]["feature_order"]),
-                "action_contract": "long_flat_spot",
+                "action_contract": "target_exposure_long_cash_v1",
+                "observation_schema": "alpha_risk_state_v1",
+                "market_context": "binance_public_v1",
                 "decision_frequency": "1h",
                 "execution_delay": "next_m1_tick",
                 "feature_z_limit": 10.0,
-                "minimum_shadow_days": 30,
+                "minimum_shadow_days": 90,
                 "commission_bps": self.config.validation.commission_bps,
                 "base_spread_bps": self.config.validation.base_spread_bps,
+                "max_risk_fraction": self.config.rl.risk_fractions[0],
                 "sha256": {
                     "model": file_sha256(model_path),
                     "feature_pipeline": file_sha256(feature_artifact),
+                    "alpha_pipeline": file_sha256(alpha_artifact),
                 },
             }
         manifest: dict[str, object] = {
-            "schema_version": 2,
+            "schema_version": 3,
             "model_id": f"{symbol.replace('/', '_')}-{self._git_sha()[:12]}",
             "symbol": symbol,
             "profile": self.config.profile,
@@ -1060,7 +1527,9 @@ class TrainingEngine:
             "git_sha": self._git_sha(),
             "seeds": list(seeds),
             "algorithms": algorithms,
-            "trial_count": len(trial_sharpes),
+            "trial_count": len(trial_sharpes) + len(alpha_trial_ledger),
+            "strategy_trial_count": len(trial_sharpes),
+            "alpha_trial_count": len(alpha_trial_ledger),
             "trial_ledger": trial_ledger,
             "pbo": pbo,
             "validation_protocol": {
@@ -1091,6 +1560,9 @@ class TrainingEngine:
             "training_benchmark": report_candidate["training_benchmark"],
             "evaluation": report_candidate["evaluation"],
             "evaluation_benchmark": report_candidate["evaluation_benchmark"],
+            "training_deterministic": report_candidate["training_deterministic"],
+            "evaluation_deterministic": report_candidate["evaluation_deterministic"],
+            "evaluation_volatility_benchmark": report_candidate["evaluation_volatility_benchmark"],
             "algorithm": report_candidate["algorithm"],
             "fold": report_candidate["fold"],
             "seed": report_candidate["seed"],

@@ -6,13 +6,27 @@ import numpy as np
 
 from validation import (
     centered_block_bootstrap_test,
+    combinatorial_pbo,
     institutional_metrics,
     moving_block_monte_carlo,
+    paired_block_bootstrap_test,
     probability_of_backtest_overfitting,
 )
 
 
 class MetricsTests(unittest.TestCase):
+    def test_cscv_pbo_and_paired_superiority_use_return_paths(self) -> None:
+        rng = np.random.default_rng(4)
+        matrix = np.column_stack(
+            (rng.normal(0.003, 0.005, 240), rng.normal(0.0, 0.005, 240))
+        )
+        pbo = combinatorial_pbo(matrix, temporal_groups=6)
+        self.assertTrue(0 <= pbo["pbo_probability"] <= 1)
+        paired = paired_block_bootstrap_test(
+            matrix[:, 0], matrix[:, 1], block_size=12, repetitions=500
+        )
+        self.assertGreater(paired["ci_low"], 0)
+
     def test_dsr_semantics_and_seeded_hypothesis_tests(self) -> None:
         rng = np.random.default_rng(12)
         returns = rng.normal(0.001, 0.01, 500)

@@ -57,6 +57,7 @@ class BracketExecutionCore:
         self.max_holding_bars = max_holding_bars
         self._decision_index = decision_bars.index
         self._m1_index = m1_bars.index
+        self._m1_open_time = self._m1_index - pd.Timedelta(minutes=1)
         self._m1_bounds = self._m1_index.searchsorted(self._decision_index, side="right")
         self._m1_open = m1_bars["Open"].to_numpy(dtype=float, copy=False)
         self._m1_high = m1_bars["High"].to_numpy(dtype=float, copy=False)
@@ -70,8 +71,9 @@ class BracketExecutionCore:
         self.equity = float(self.initial_equity)
         self.position = SimulatedPosition()
         self.trades: list[dict[str, Any]] = []
-        self.return_mean = 0.0
-        self.return_square_mean = 0.0
+        self.target_exposure = 0.0
+        self.last_marked_equity = float(self.initial_equity)
+        self.peak_marked_equity = float(self.initial_equity)
 
     @staticmethod
     def _entry_price(price: float, direction: int, spread: float, slippage: float) -> float:
@@ -134,17 +136,47 @@ class BracketExecutionCore:
             }
         )
         self.position = SimulatedPosition()
+        self.target_exposure = 0.0
         return realized_r
 
-    def _differential_sharpe(self, realized_r: float, eta: float = 0.01) -> float:
-        mean, square_mean = self.return_mean, self.return_square_mean
-        variance = square_mean - mean**2
-        value = 0.0
-        if variance > 1e-12:
-            value = (square_mean * (realized_r - mean) - 0.5 * mean * (realized_r**2 - square_mean)) / variance**1.5
-        self.return_mean = mean + eta * (realized_r - mean)
-        self.return_square_mean = square_mean + eta * (realized_r**2 - square_mean)
-        return float(value)
+    def marked_equity(self, raw_price: float, spread: float = 0.0, slippage: float = 0.0) -> float:
+        position = self.position
+        if not position.direction:
+            return float(self.equity)
+        exit_price = self._exit_price(raw_price, position.direction, spread, slippage)
+        exit_commission = exit_price * position.quantity * self.commission_rate
+        unrealized = (exit_price - position.entry_price) * position.quantity * position.direction
+        return float(self.equity + unrealized - exit_commission)
+
+    def state_values(
+        self,
+        decision_index: int,
+        *,
+        spread: float = 0.0,
+        slippage: float = 0.0,
+    ) -> tuple[float, ...]:
+        close = max(float(self._decision_close[decision_index]), 1e-12)
+        atr_value = max(
+            float(self._decision_atr[decision_index]) if self._decision_atr is not None else 0.0,
+            1e-12,
+        )
+        marked = self.marked_equity(close, spread, slippage)
+        position = self.position
+        entry_distance = (
+            (close - position.entry_price) * position.direction / atr_value if position.direction else 0.0
+        )
+        unrealized = (marked - self.equity) / max(self.initial_equity, 1e-12)
+        drawdown = marked / max(self.peak_marked_equity, 1e-12) - 1.0
+        estimated_cost = 2 * self.commission_rate + spread / close
+        return (
+            self.target_exposure,
+            entry_distance,
+            unrealized,
+            position.decision_bars / max(self.max_holding_bars, 1),
+            drawdown,
+            atr_value / close,
+            estimated_cost,
+        )
 
     def _scan_position(self, start: int, stop: int, spread: float, slippage: float) -> float:
         position = self.position
@@ -215,6 +247,41 @@ class BracketExecutionCore:
         )
         return reward, realized_r, equity
 
+    def execute_target_exposure(
+        self,
+        decision_index: int,
+        target_exposure: float,
+        *,
+        max_risk_fraction: float = 0.005,
+        sl_atr_multiplier: float = 2.0,
+        tp_sl_ratio: float = 2.0,
+        no_trade_band: float = 0.10,
+        spread: float = 0.0,
+        slippage: float = 0.0,
+        latency_ticks: int = 1,
+    ) -> tuple[float, float, float]:
+        target = float(target_exposure)
+        if not np.isfinite(target) or not 0.0 <= target <= 1.0:
+            raise ValueError("target exposure must be finite and in [0, 1]")
+        if not 0.0 <= no_trade_band < 1.0 or not 0 < max_risk_fraction <= 1.0:
+            raise ValueError("invalid target-exposure risk contract")
+        if abs(target - self.target_exposure) < no_trade_band:
+            target = self.target_exposure
+        if target < no_trade_band:
+            target = 0.0
+        reward, realized_r, _, _, _, equity = self._execute_values(
+            decision_index,
+            int(target > 0),
+            max(max_risk_fraction * target, 1e-12),
+            sl_atr_multiplier,
+            tp_sl_ratio,
+            spread,
+            slippage,
+            latency_ticks,
+            target_exposure=target,
+        )
+        return reward, realized_r, equity
+
     def _execute_values(
         self,
         decision_index: int,
@@ -225,6 +292,7 @@ class BracketExecutionCore:
         spread: float,
         slippage: float,
         latency_ticks: int,
+        target_exposure: float | None = None,
     ) -> tuple[float, float, float, float, float, float]:
         if not 0 <= decision_index < len(self.decision_bars) - 1 or latency_ticks < 1:
             raise ValueError("invalid decision index or latency")
@@ -240,8 +308,9 @@ class BracketExecutionCore:
         split = min(action_tick, hi)
         realized_r = self._scan_position(lo, split, spread, slippage)
         if action_tick < hi:
-            timestamp = self._m1_index[action_tick]
-            if direction != self.position.direction:
+            timestamp = self._m1_open_time[action_tick]
+            resize = target_exposure is not None and target_exposure != self.target_exposure
+            if direction != self.position.direction or resize:
                 if self.position.direction:
                     realized_r += self._close(timestamp, self._m1_open[action_tick], "signal", spread, slippage)
                 if direction:
@@ -256,13 +325,11 @@ class BracketExecutionCore:
                         spread,
                         slippage,
                     )
+                    self.target_exposure = 1.0 if target_exposure is None else target_exposure
             realized_r += self._scan_position(action_tick, hi, spread, slippage)
 
-        holding_cost = 0.0
         if self.position.direction:
             self.position.decision_bars += 1
-            holding_cost = self.holding_cost_r
-            self.equity -= self.position.risk_cash * holding_cost
             if self.position.decision_bars >= self.max_holding_bars:
                 raw_exit = self._m1_close[hi - 1] if hi > lo else self._decision_close[decision_index + 1]
                 realized_r += self._close(end, raw_exit, "timeout", spread, slippage)
@@ -272,7 +339,9 @@ class BracketExecutionCore:
             exit_time = self._m1_index[hi - 1] if hi > lo else end
             realized_r += self._close(exit_time, raw_exit, "segment_end", spread, slippage)
 
-        differential = self._differential_sharpe(realized_r)
-        penalty = self.downside_penalty * min(realized_r, 0) ** 2
-        reward = realized_r + self.differential_sharpe_weight * differential - penalty - holding_cost
-        return reward, realized_r, differential, penalty, holding_cost, self.equity
+        mark_price = self._m1_close[hi - 1] if hi > lo else self._decision_close[decision_index + 1]
+        marked_equity = self.marked_equity(mark_price, spread, slippage)
+        reward = float(np.log(max(marked_equity, 1e-12) / max(self.last_marked_equity, 1e-12)))
+        self.last_marked_equity = marked_equity
+        self.peak_marked_equity = max(self.peak_marked_equity, marked_equity)
+        return reward, realized_r, 0.0, 0.0, 0.0, marked_equity

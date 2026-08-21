@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from rl import BracketExecutionCore, ppo_intent, qrdqn_action_table, sac_intent
+from rl import BracketExecutionCore, BracketTradingEnvV2, ppo_intent, qrdqn_action_table, sac_intent
 
 
 class EnvironmentTests(unittest.TestCase):
@@ -20,8 +20,8 @@ class EnvironmentTests(unittest.TestCase):
         core = BracketExecutionCore(decisions, m1, commission_rate=0, holding_cost_r=0)
         intent = ppo_intent([1, 0, 0], model_id="m", book="btc_usd", timestamp=decisions.index[0].to_pydatetime())
         result = core.execute_interval(0, intent)
-        self.assertEqual(core.trades[0]["entry_time"], m1_index[0])
-        self.assertGreater(core.trades[0]["entry_time"], decisions.index[0])
+        self.assertEqual(core.trades[0]["entry_time"], decisions.index[0])
+        self.assertGreaterEqual(core.trades[0]["entry_time"], decisions.index[0])
         self.assertEqual(core.trades[0]["reason"], "stop")
         self.assertAlmostEqual(result.realized_r, -1.0)
 
@@ -57,6 +57,41 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(core.position.direction, 0)
         self.assertEqual(core.trades[-1]["reason"], "segment_end")
         self.assertGreater(result.realized_r, 0)
+
+    def test_target_exposure_resizes_and_observes_reward_state(self) -> None:
+        decisions = pd.DataFrame(
+            {
+                "Open": [100, 100, 100],
+                "High": [100, 100, 100],
+                "Low": [100, 100, 100],
+                "Close": [100, 100, 100],
+                "atr": [10, 10, 10],
+                "feature": [0.0, 0.0, 0.0],
+            },
+            index=pd.date_range("2025-01-01 01:00", periods=3, freq="h", tz="UTC"),
+        )
+        m1 = pd.DataFrame(
+            {"Open": 100.0, "High": 100.0, "Low": 100.0, "Close": 100.0},
+            index=pd.date_range("2025-01-01 01:01", periods=120, freq="min", tz="UTC"),
+        )
+        environment = BracketTradingEnvV2(
+            decisions,
+            m1,
+            ["feature"],
+            action_mode="sac",
+            randomize=False,
+            commission_rate=0,
+        )
+        observation, _ = environment.reset()
+        self.assertEqual(observation.shape, (8,))
+        _, first_reward, _, _, first_info = environment.step(np.asarray([0.5], dtype=np.float32))
+        _, second_reward, _, truncated, second_info = environment.step(np.asarray([0.8], dtype=np.float32))
+        self.assertTrue(np.isfinite(first_reward))
+        self.assertTrue(np.isfinite(second_reward))
+        self.assertEqual(first_info["target_exposure"], 0.5)
+        self.assertTrue(truncated)
+        self.assertEqual(second_info["target_exposure"], 0.0)
+        self.assertEqual(environment.core.trades[0]["reason"], "signal")
 
 
 if __name__ == "__main__":

@@ -170,9 +170,9 @@ class ExecutionEngineTests(unittest.IsolatedAsyncioTestCase):
                 journal,
                 rest,
                 {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "selected_artifact": "model",
-                    "artifact_bundle": {"action_contract": "long_flat_spot"},
+                    "artifact_bundle": {"action_contract": "target_exposure_long_cash_v1"},
                 },
             )
             engine.enabled = True
@@ -205,9 +205,9 @@ class ExecutionEngineTests(unittest.IsolatedAsyncioTestCase):
                 journal,
                 rest,
                 {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "selected_artifact": "model",
-                    "artifact_bundle": {"action_contract": "long_flat_spot"},
+                    "artifact_bundle": {"action_contract": "target_exposure_long_cash_v1"},
                 },
             )
             engine.enabled = True
@@ -233,9 +233,9 @@ class ExecutionEngineTests(unittest.IsolatedAsyncioTestCase):
                 journal,
                 _PreflightREST(),
                 {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "selected_artifact": "model",
-                    "artifact_bundle": {"action_contract": "long_flat_spot"},
+                    "artifact_bundle": {"action_contract": "target_exposure_long_cash_v1"},
                 },
             )
             await engine.preflight(("btc_usd",))

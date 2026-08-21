@@ -1,6 +1,6 @@
 # tradingbot-bitso
 
-A causal, CPCV-validated reinforcement-learning research and Bitso execution platform for `BTC/USD` and `ETH/USD`. Research data comes only from Alpaca; deployment market data and orders come only from matching Bitso `btc_usd` and `eth_usd` books.
+A causal, signal-first reinforcement-learning research and Bitso execution platform for `BTC/USD` and `ETH/USD`. Alpaca supplies target-venue research bars, free Binance spot/futures/funding data supplies causal market context, and deployment orders use matching Bitso `btc_usd` and `eth_usd` books.
 
 The system defaults to a non-promotable smoke profile and paper execution. It does not promise profitability: failed statistical or risk gates produce reports and block live loading.
 
@@ -25,17 +25,25 @@ The safe default is a short, non-promotable verification run:
 .venv/bin/python run_quant_pipeline.py --profile smoke --symbol BTC/USD
 ```
 
-The full profile downloads the complete Alpaca M1 history, runs chronological 36-month train / 6-month validation / 6-month evaluation folds, keeps the newest six complete months sealed, and trains RecurrentPPO, SAC, TQC, and CVaR QR-DQN independently for every configured seed. A development-qualified algorithm is retrained before the sealed holdout is evaluated once.
+The first run after this schema upgrade must populate and validate the public Binance context cache and migrate legacy Alpaca crypto timestamps exactly once:
+
+```bash
+.venv/bin/python run_quant_pipeline.py --profile smoke --symbol BTC/USD --no-cache-only
+```
+
+The full profile uses chronological 36-month train / 6-month validation / 6-month evaluation folds, keeps the newest six complete months sealed, and trains RecurrentPPO and TQC over five seeds by default. SAC and CVaR QR-DQN remain available as explicitly enabled research challengers. A development-qualified algorithm is retrained before the sealed holdout is evaluated once.
 
 ```bash
 .venv/bin/python run_quant_pipeline.py --profile full
 ```
 
-Full training belongs on the external high-resource machine. This VPS is intended for compile checks and the bounded safety suite.
+Full training and runtime validation belong on the external high-resource machine. This VPS is for static inspection only.
 
-Research outputs include per-symbol manifests plus separate training and evaluation QuantStats reports. Both reports compare the selected RL checkpoint with buy-and-hold on identical timestamps and include observed/Monte Carlo equity, underwater drawdown, monthly returns, and return distributions. A smoke manifest can never pass promotion.
+The first full run must also use `--no-cache-only` so Binance context is backfilled for the complete research window; later runs can return to the cache-only default.
 
-The H1 state includes a causal M1 realized-volatility term structure at 1h, 4h, 1d, and 7d. Evaluation uses configured commission and spread assumptions, while a separate seeded stress replay adds wider spreads, slippage, latency, and feature noise. The defaults are conservative fallbacks; calibrate them from observed Bitso fees and public market data before treating a full run as deployable.
+Research outputs include per-symbol manifests plus separate training and evaluation QuantStats reports. Both reports compare RL with cost-adjusted buy-and-hold and deterministic alpha; evaluation also includes volatility-matched buy-and-hold. A smoke manifest can never pass promotion.
+
+Each fold first fits Ridge and shallow gradient-boosted 4h/12h/24h alpha experts on training data only. RL receives their forecasts and uncertainty plus observable risk state, and controls one long/cash target exposure. Evaluation uses configured commission and spread assumptions; stress replay doubles both, adds slippage, one-to-three-minute latency, and feature noise. Promotion requires positive alpha controls, paired superiority over deterministic alpha and volatility-matched buy-and-hold, CSCV PBO, a 90% model-confidence set, five-seed IQM bounds, and the existing risk gates.
 
 ## Approval and live safety
 
@@ -65,7 +73,7 @@ Set a random `DASHBOARD_TOKEN` of at least 16 characters, then run:
 .venv/bin/python run_live_service.py
 ```
 
-The service coordinates the Bitso L2 stream, paper/live engine, approved policy inference, FastAPI dashboard, SQLite journal, and optional Telegram bot in one asyncio loop. It persists close-labelled public Bitso M1 midprice bars, waits for enough causal feature history, decides only on a closed H1 bar, and executes on the following market update. One manifest controls its matching symbol/book; run separate approved services for independently qualified symbols. Feature/hash/action mismatches or excessive standardized feature drift freeze policy execution.
+The service coordinates the Bitso L2 stream, paper/live engine, approved policy inference, Binance public context refresh, FastAPI dashboard, SQLite journal, and optional Telegram bot. It requires 90 shadow days, persists close-labelled Bitso M1 bars, decides only on a closed H1 bar, and executes on the following market update. Feature/hash/action/context mismatches or excessive standardized feature drift freeze policy execution.
 
 For Telegram, set `TELEGRAM_BOT_TOKEN` and a comma-separated `TELEGRAM_ALLOWED_CHAT_IDS`. Authorized chats receive `/status`, `/balance`, `/backtest`, `/params`, `/set_risk`, and immediate `/kill`; unauthorized chats are ignored.
 

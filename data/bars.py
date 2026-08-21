@@ -130,7 +130,7 @@ def load_ohlcv(
         end_date=end_date,
         max_days_for_demo=max_days_for_demo,
         cache_dir=cfg.data_dir,
-        timestamp_is_bar_open=False,
+        timestamp_is_bar_open=True,
     )
 
 

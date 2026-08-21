@@ -1,3 +1,10 @@
+from .alpha import (
+    ALPHA_FORECAST_COLUMNS,
+    ALPHA_HORIZONS,
+    ALPHA_TARGET_COLUMN,
+    CausalAlphaEnsemble,
+    forward_return_targets,
+)
 from .features import (
     VOLATILITY_WINDOWS,
     HAR_RV_COLUMNS,
@@ -18,8 +25,12 @@ from .regimes import CausalRegimeModel
 from .wavelets import rolling_wavelet_features
 
 __all__ = [
+    "ALPHA_FORECAST_COLUMNS",
+    "ALPHA_HORIZONS",
+    "ALPHA_TARGET_COLUMN",
     "ADFSelection",
     "CausalFeaturePipeline",
+    "CausalAlphaEnsemble",
     "CausalRegimeModel",
     "VOLATILITY_WINDOWS",
     "HAR_RV_COLUMNS",
@@ -28,6 +39,7 @@ __all__ = [
     "align_m1_features_to_decisions",
     "atr",
     "fixed_width_fracdiff",
+    "forward_return_targets",
     "fracdiff_weights",
     "garman_klass_volatility",
     "micro_price",
