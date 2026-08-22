@@ -6,18 +6,40 @@ The system defaults to a non-promotable smoke profile and paper execution. It do
 
 ## Install
 
-PufferLib 3.0.0 supports Linux and macOS, not native Windows. On a Windows host, run this repository inside WSL2 with `g++`, the Linux NVIDIA CUDA toolkit, and `nvcc` available. Python 3.11 and every direct and transitive dependency are pinned.
+PufferLib 3.0.0 supports Linux and macOS, not native Windows. On a Windows host, run every command below from a WSL2 shell with Linux Conda, `g++`, the Linux NVIDIA CUDA toolkit, and `nvcc` available. Do not use Windows Conda, PowerShell, or `python.exe`. Python 3.11 and every direct and transitive dependency are pinned.
+
+Keep the checkout and training data in WSL's Linux filesystem for maximum I/O throughput. A path below `/mnt/c` works, but is slower than a path below `/home` for Linux workloads. From an existing Windows checkout, copy it once and continue from the Linux copy:
 
 ```bash
-conda create --name tradingbot-bitso python=3.11 -y
+mkdir -p ~/projects
+cp -a /mnt/c/path/to/tradingbot-bitso ~/projects/tradingbot-bitso
+cd ~/projects/tradingbot-bitso
+```
+
+The Windows NVIDIA driver supplies WSL's CUDA driver. Do not install a Linux display driver inside WSL. The Linux CUDA 13.3 toolkit is still required to compile PufferLib's training extension. Verify the toolchain and expose its default installation path before creating the environment:
+
+```bash
+nvidia-smi
+nvcc --version
+g++ --version
+export CUDA_HOME=/usr/local/cuda-13.3
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+```
+
+If `conda` is unavailable in the WSL shell, install the Linux Miniconda distribution; a Windows Conda installation cannot provide the Linux environment.
+
+```bash
+conda create --name tradingbot-bitso python=3.11 pip -y
 conda activate tradingbot-bitso
 python -m pip install numpy==1.26.4 setuptools==84.0.0 torch==2.13.0
-NO_OCEAN=1 python -m pip install --no-build-isolation -r requirements.txt
+NO_OCEAN=1 TORCH_CUDA_ARCH_LIST=12.0 python -m pip install --no-build-isolation -r requirements.txt
 python -m pip check
+python -c "import pufferlib, torch; print('PufferLib:', pufferlib.__version__); print('CUDA:', torch.cuda.is_available()); print('PyTorch CUDA:', torch.version.cuda); print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
 cp .env.example .env
 ```
 
-The bootstrap install is required because PufferLib imports NumPy and PyTorch while compiling its training extension. Keep `NO_OCEAN=1` to skip unrelated demo environments; do not set `NO_TRAIN`, because PuffeRL requires the compiled advantage extension. Verify `g++ --version`, `nvidia-smi`, and `nvcc --version` inside WSL before installation so the extension builds with CUDA instead of the CPU fallback.
+The bootstrap install is required because PufferLib imports NumPy and PyTorch while compiling its training extension. `TORCH_CUDA_ARCH_LIST=12.0` targets the RTX 5070's Blackwell architecture instead of compiling unused GPU targets. Keep `NO_OCEAN=1` to skip unrelated demo environments; do not set `NO_TRAIN`, because PuffeRL requires the compiled advantage extension. The verification command must print `CUDA: True` and the RTX 5070 before training.
 
 Put secrets only in `.env` or the process environment. Data, model artifacts, SQLite journals, reports, notebooks, and caches are ignored by Git.
 

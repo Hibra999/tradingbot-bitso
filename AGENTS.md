@@ -9,10 +9,10 @@ The repository is organized by domain. `config/` owns environment-backed setting
 Python 3.11, WSL2/Linux, `g++`, `nvcc`, and the fully pinned lock file are required. Native Windows is unsupported because PufferLib 3.0.0 rejects it. PufferLib must be built with its training extension; `NO_OCEAN=1` skips only unrelated demo environments.
 
 ```bash
-conda create --name tradingbot-bitso python=3.11 -y
+conda create --name tradingbot-bitso python=3.11 pip -y
 conda activate tradingbot-bitso
 python -m pip install numpy==1.26.4 setuptools==84.0.0 torch==2.13.0
-NO_OCEAN=1 python -m pip install --no-build-isolation -r requirements.txt
+NO_OCEAN=1 TORCH_CUDA_ARCH_LIST=12.0 python -m pip install --no-build-isolation -r requirements.txt
 python -m pip check
 python -m unittest discover -s tests -v
 python run_quant_pipeline.py --profile smoke --symbol BTC/USD
