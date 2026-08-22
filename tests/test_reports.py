@@ -59,7 +59,6 @@ class ReportTests(unittest.TestCase):
         index = pd.date_range("2025-01-01", periods=48, freq="h", tz="UTC")
         strategy = pd.Series(np.tile([0.002, -0.001], 24), index=index)
         benchmark = pd.Series(np.tile([0.001, -0.0008], 24), index=index)
-        alpha = pd.Series(np.tile([0.0015, -0.0009], 24), index=index)
         monte_carlo = moving_block_monte_carlo(
             strategy.to_numpy(), paths=20, block_size=4, batch_size=5, seed=3
         )
@@ -68,6 +67,8 @@ class ReportTests(unittest.TestCase):
         def quantstats_html(returns, *, benchmark, output, **kwargs) -> None:
             captured["returns"] = returns
             captured["benchmark"] = benchmark
+            captured["strategy_title"] = kwargs["strategy_title"]
+            captured["benchmark_title"] = kwargs["benchmark_title"]
             Path(output).write_text("<html><body></body></html>", encoding="utf-8")
 
         quantstats = SimpleNamespace(reports=SimpleNamespace(html=quantstats_html))
@@ -82,12 +83,12 @@ class ReportTests(unittest.TestCase):
                 symbol="BTC/USD",
                 agent_name="PuffeRL-LSTM",
                 benchmark=benchmark,
-                comparators={"Alpha": alpha},
             )
             self.assertIn("PuffeRL-LSTM", report["text_report"])
             self.assertNotIn("RL model", report["text_report"])
             self.assertIn("Buy & Hold", report["text_report"])
-            self.assertIn("Alpha", report["text_report"])
+            self.assertNotIn("Strategy", report["text_report"])
+            self.assertNotIn("Alpha", report["text_report"])
             self.assertIn("<pre>", report["telegram_report"])
             self.assertIn("PuffeRL-LSTM", report["telegram_report"])
             self.assertIn("B&amp;H", report["telegram_report"])
@@ -99,6 +100,8 @@ class ReportTests(unittest.TestCase):
             pd.testing.assert_index_equal(captured["benchmark"].index, expected_index)
             np.testing.assert_array_equal(captured["returns"].to_numpy(), strategy.to_numpy())
             np.testing.assert_array_equal(captured["benchmark"].to_numpy(), benchmark.to_numpy())
+            self.assertEqual(captured["strategy_title"], "PuffeRL-LSTM")
+            self.assertEqual(captured["benchmark_title"], "Buy & Hold")
 
 
 if __name__ == "__main__":

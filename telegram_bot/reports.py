@@ -196,7 +196,7 @@ def generate_full_report(
     array = values.to_numpy()
     metrics = advanced_metrics(array, periods)
     total = float(np.prod(1 + array) - 1)
-    report_headers = ("Strategy", "Pair", "Periods", "Avg Return %", "Tot Return %", "Win", "Draw", "Loss", "Win%")
+    report_headers = ("Model", "Pair", "Periods", "Avg Return %", "Tot Return %", "Win", "Draw", "Loss", "Win%")
 
     def report_row(name: str, series: pd.Series) -> tuple[str, ...]:
         data = series.to_numpy(dtype=float)
@@ -349,6 +349,8 @@ def generate_full_report(
                 title=title,
                 periods_per_year=periods,
                 download_filename=destination.name,
+                strategy_title=agent_name,
+                benchmark_title="Buy & Hold",
             )
     except np.linalg.LinAlgError:
         quantstats_error = "QuantStats plots unavailable: return covariance is singular."

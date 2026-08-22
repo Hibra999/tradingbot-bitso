@@ -178,7 +178,6 @@ def main() -> int:
                         symbol=symbol,
                         agent_name=agent_name,
                         benchmark=reporting["training_benchmark"],
-                        comparators={"Alpha": reporting["training_deterministic"]},
                     )
                     evaluation_report = generate_full_report(
                         evaluation_returns,
@@ -188,10 +187,6 @@ def main() -> int:
                         symbol=symbol,
                         agent_name=agent_name,
                         benchmark=reporting["evaluation_benchmark"],
-                        comparators={
-                            "Alpha": reporting["evaluation_deterministic"],
-                            "Vol B&H": reporting["evaluation_volatility_benchmark"],
-                        },
                     )
                     notifier.notify_html(evaluation_report["telegram_report"])
                     notifier.send_photo(
