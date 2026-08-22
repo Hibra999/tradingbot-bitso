@@ -33,13 +33,14 @@ If `conda` is unavailable in the WSL shell, install the Linux Miniconda distribu
 conda create --name tradingbot-bitso python=3.11 pip -y
 conda activate tradingbot-bitso
 python -m pip install numpy==1.26.4 setuptools==84.0.0 torch==2.13.0
+bash scripts/install_pufferlib_wsl.sh
 NO_OCEAN=1 TORCH_CUDA_ARCH_LIST=12.0 python -m pip install --no-build-isolation -r requirements.txt
 python -m pip check
 python -c "import pufferlib, torch; print('PufferLib:', pufferlib.__version__); print('CUDA:', torch.cuda.is_available()); print('PyTorch CUDA:', torch.version.cuda); print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
 cp .env.example .env
 ```
 
-The bootstrap install is required because PufferLib imports NumPy and PyTorch while compiling its training extension. `TORCH_CUDA_ARCH_LIST=12.0` targets the RTX 5070's Blackwell architecture instead of compiling unused GPU targets. Keep `NO_OCEAN=1` to skip unrelated demo environments; do not set `NO_TRAIN`, because PuffeRL requires the compiled advantage extension. The verification command must print `CUDA: True` and the RTX 5070 before training.
+The bootstrap install is required because PufferLib imports NumPy and PyTorch while compiling its training extension. PufferLib 3.0.0 also references an undefined `c_extension_paths` while preparing `NO_OCEAN=1` metadata. The installer verifies the exact upstream archive, applies the one-line packaging fix in a temporary directory, and installs the resulting wheel before the lock resolves its pinned dependencies. `TORCH_CUDA_ARCH_LIST=12.0` targets the RTX 5070's Blackwell architecture instead of compiling unused GPU targets. Keep `NO_OCEAN=1` to skip unrelated demo environments; do not set `NO_TRAIN`, because PuffeRL requires the compiled advantage extension. The verification command must print `CUDA: True` and the RTX 5070 before training.
 
 Put secrets only in `.env` or the process environment. Data, model artifacts, SQLite journals, reports, notebooks, and caches are ignored by Git.
 

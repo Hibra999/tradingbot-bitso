@@ -12,6 +12,7 @@ Python 3.11, WSL2/Linux, `g++`, `nvcc`, and the fully pinned lock file are requi
 conda create --name tradingbot-bitso python=3.11 pip -y
 conda activate tradingbot-bitso
 python -m pip install numpy==1.26.4 setuptools==84.0.0 torch==2.13.0
+bash scripts/install_pufferlib_wsl.sh
 NO_OCEAN=1 TORCH_CUDA_ARCH_LIST=12.0 python -m pip install --no-build-isolation -r requirements.txt
 python -m pip check
 python -m unittest discover -s tests -v
