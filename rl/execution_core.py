@@ -57,7 +57,6 @@ class BracketExecutionCore:
         self.max_holding_bars = max_holding_bars
         self._decision_index = decision_bars.index
         self._m1_index = m1_bars.index
-        self._m1_open_time = self._m1_index - pd.Timedelta(minutes=1)
         self._m1_bounds = self._m1_index.searchsorted(self._decision_index, side="right")
         self._m1_open = m1_bars["Open"].to_numpy(dtype=float, copy=False)
         self._m1_high = m1_bars["High"].to_numpy(dtype=float, copy=False)
@@ -308,7 +307,7 @@ class BracketExecutionCore:
         split = min(action_tick, hi)
         realized_r = self._scan_position(lo, split, spread, slippage)
         if action_tick < hi:
-            timestamp = self._m1_open_time[action_tick]
+            timestamp = self._m1_index[action_tick] - pd.Timedelta(minutes=1)
             resize = target_exposure is not None and target_exposure != self.target_exposure
             if direction != self.position.direction or resize:
                 if self.position.direction:

@@ -18,6 +18,7 @@ class EnvironmentTests(unittest.TestCase):
         m1 = pd.DataFrame({"Open": 100.0, "High": 100.0, "Low": 100.0, "Close": 100.0}, index=m1_index)
         m1.iloc[0] = [100, 102, 98, 100]
         core = BracketExecutionCore(decisions, m1, commission_rate=0, holding_cost_r=0)
+        self.assertFalse(hasattr(core, "_m1_open_time"))
         intent = ppo_intent([1, 0, 0], model_id="m", book="btc_usd", timestamp=decisions.index[0].to_pydatetime())
         result = core.execute_interval(0, intent)
         self.assertEqual(core.trades[0]["entry_time"], decisions.index[0])
