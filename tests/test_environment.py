@@ -17,6 +17,23 @@ from validation import PerturbationConfig
 
 
 class EnvironmentTests(unittest.TestCase):
+    def test_differential_sharpe_is_warmed_up_bounded_and_reset(self) -> None:
+        decisions = pd.DataFrame(
+            {"Close": [100.0, 100.0], "atr": [1.0, 1.0]},
+            index=pd.date_range("2025-01-01", periods=2, freq="h", tz="UTC"),
+        )
+        m1 = pd.DataFrame(
+            {"Open": [100.0], "High": [100.0], "Low": [100.0], "Close": [100.0]},
+            index=pd.date_range("2025-01-01 00:01", periods=1, freq="min", tz="UTC"),
+        )
+        core = BracketExecutionCore(decisions, m1)
+        values = [core._differential_sharpe(value) for value in (0.01, -0.01) * 13]
+        self.assertTrue(all(value == 0.0 for value in values[:24]))
+        self.assertTrue(any(value != 0.0 for value in values[24:]))
+        self.assertTrue(all(-1.0 <= value <= 1.0 for value in values))
+        core.reset()
+        self.assertEqual(core._differential_sharpe(0.01), 0.0)
+
     def test_entry_is_next_m1_tick_and_same_bar_tie_is_stop_first(self) -> None:
         decisions = pd.DataFrame(
             {"Open": [100, 100], "High": [101, 101], "Low": [99, 99], "Close": [100, 100], "atr": [1, 1]},

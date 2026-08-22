@@ -73,6 +73,25 @@ class BracketExecutionCore:
         self.target_exposure = 0.0
         self.last_marked_equity = float(self.initial_equity)
         self.peak_marked_equity = float(self.initial_equity)
+        self.return_mean = 0.0
+        self.return_square_mean = 0.0
+        self.return_observations = 0
+
+    def _differential_sharpe(self, portfolio_return: float, eta: float = 0.01) -> float:
+        mean, square_mean = self.return_mean, self.return_square_mean
+        variance = square_mean - mean**2
+        value = 0.0
+        if self.return_observations >= 24 and variance > 1e-12:
+            value = (
+                square_mean * (portfolio_return - mean)
+                - 0.5 * mean * (portfolio_return**2 - square_mean)
+            ) / variance**1.5
+        self.return_mean = mean + eta * (portfolio_return - mean)
+        self.return_square_mean = square_mean + eta * (
+            portfolio_return**2 - square_mean
+        )
+        self.return_observations += 1
+        return float(np.clip(value, -1.0, 1.0))
 
     @staticmethod
     def _entry_price(price: float, direction: int, spread: float, slippage: float) -> float:
@@ -346,7 +365,14 @@ class BracketExecutionCore:
 
         mark_price = self._m1_close[hi - 1] if hi > lo else self._decision_close[decision_index + 1]
         marked_equity = self.marked_equity(mark_price, spread, slippage)
-        reward = float(np.log(max(marked_equity, 1e-12) / max(self.last_marked_equity, 1e-12)))
+        portfolio_return = float(
+            np.log(max(marked_equity, 1e-12) / max(self.last_marked_equity, 1e-12))
+        )
+        differential = self._differential_sharpe(portfolio_return)
+        peak_marked_equity = max(self.peak_marked_equity, marked_equity)
+        drawdown = marked_equity / max(peak_marked_equity, 1e-12) - 1.0
+        penalty = self.downside_penalty * drawdown**2
+        reward = portfolio_return + self.differential_sharpe_weight * differential - penalty
         self.last_marked_equity = marked_equity
-        self.peak_marked_equity = max(self.peak_marked_equity, marked_equity)
-        return reward, realized_r, 0.0, 0.0, 0.0, marked_equity
+        self.peak_marked_equity = peak_marked_equity
+        return reward, realized_r, differential, penalty, 0.0, marked_equity
