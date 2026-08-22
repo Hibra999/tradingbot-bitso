@@ -44,6 +44,24 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertLess(first["ci95_low"], first["ci95_high"])
 
+    def test_undefined_dsr_requires_explicit_smoke_fallback(self) -> None:
+        returns = np.array([0.01, -0.005, 0.002, -0.001] * 20)
+        with self.assertRaisesRegex(ValueError, "DSR requires at least two"):
+            institutional_metrics(
+                returns,
+                trial_sharpes=[0.1],
+                bootstrap_repetitions=10,
+            )
+        metrics = institutional_metrics(
+            returns,
+            trial_sharpes=[0.1],
+            bootstrap_repetitions=10,
+            allow_undefined_dsr=True,
+        )
+        self.assertTrue(np.isnan(metrics["dsr_z"]))
+        self.assertTrue(np.isnan(metrics["dsr_probability"]))
+        self.assertTrue(np.isnan(metrics["dsr_p_value"]))
+
     def test_monte_carlo_is_batched_seeded_and_reports_ruin(self) -> None:
         returns = np.array([0.01, -0.005, 0.002, -0.001] * 20)
         first = moving_block_monte_carlo(returns, paths=100, horizon=40, block_size=4, batch_size=13, seed=9)

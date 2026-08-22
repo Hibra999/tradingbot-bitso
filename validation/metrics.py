@@ -301,12 +301,18 @@ def institutional_metrics(
     periods_per_year: int = 365 * 24,
     bootstrap_repetitions: int = 2_000,
     seed: int = 0,
+    allow_undefined_dsr: bool = False,
 ) -> dict[str, float]:
     values = _returns(returns)
     gains, losses = values[values > 0].sum(), -values[values < 0].sum()
     q05, q95 = np.quantile(values, [0.05, 0.95])
     psr = probabilistic_sharpe_ratio(values, periods_per_year=periods_per_year)
-    dsr = deflated_sharpe_ratio(values, trial_sharpes, periods_per_year)
+    finite_trial_count = int(np.count_nonzero(np.isfinite(np.asarray(trial_sharpes, dtype=float))))
+    dsr = (
+        ProbabilityRatio(float("nan"), float("nan"), float("nan"))
+        if allow_undefined_dsr and finite_trial_count < 2
+        else deflated_sharpe_ratio(values, trial_sharpes, periods_per_year)
+    )
     t_test = stats.ttest_1samp(values, popmean=0.0)
     bootstrap = centered_block_bootstrap_test(
         values,

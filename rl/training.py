@@ -1111,6 +1111,7 @@ class TrainingEngine:
                 evaluation.to_numpy(),
                 trial_sharpes=trial_sharpes,
                 bootstrap_repetitions=2_000 if self.config.profile == "full" else 100,
+                allow_undefined_dsr=self.config.profile == "smoke",
             )
             seed_evaluation = SeedHarness(seeds, smoke=self.config.profile == "smoke").run(
                 lambda seed: {
