@@ -138,7 +138,9 @@ def main() -> int:
                             )
                         )
                     phase_bar.update()
-                    phase_bar.set_postfix_str(f"{PUFFER_AGENT_NAME} training")
+                    phase = f"{PUFFER_AGENT_NAME} training" if args.profile == "full" else "structural validation"
+                    phase_bar.set_postfix_str(phase)
+                    notifier.track(f"{symbol} | {phase}")
                     manifest = TrainingEngine(config, runner=runner, notifier=notifier).run_symbol(symbol, decision, m1)
                     phase_bar.update()
                     reporting = manifest.pop("_reporting")

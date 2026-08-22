@@ -38,8 +38,10 @@ class PipelineNotifier:
         self._send_lock, self._state_lock = threading.Lock(), threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._status, self._started = "", 0.0
+        self._status, self._query_status, self._started = "", "", 0.0
         self._message_ids: dict[int, int] = {}
+        self._sent_message_ids: dict[int, set[int]] = {}
+        self._command_offset: int | None = None
 
     @property
     def enabled(self) -> bool:
@@ -61,28 +63,44 @@ class PipelineNotifier:
                 self._last_send = time.monotonic()
                 return None
 
+    def _remember_message(self, chat_id: int, result: object) -> None:
+        if not isinstance(result, dict) or "message_id" not in result:
+            return
+        try:
+            message_id = int(result["message_id"])
+        except (TypeError, ValueError):
+            return
+        with self._state_lock:
+            self._sent_message_ids.setdefault(chat_id, set()).add(message_id)
+
+    def _send_message(self, chat_id: int, text: str, *, parse_mode: str | None = None) -> None:
+        payload: dict[str, object] = {"chat_id": chat_id, "text": text[:4000]}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        self._remember_message(chat_id, self._post("sendMessage", json=payload))
+
     def notify(self, text: str) -> None:
         for chat_id in self._chat_ids:
-            self._post("sendMessage", json={"chat_id": chat_id, "text": text[:4000]})
+            self._send_message(chat_id, text)
 
     def notify_html(self, text: str) -> None:
         for chat_id in self._chat_ids:
-            self._post(
-                "sendMessage",
-                json={"chat_id": chat_id, "text": text[:4000], "parse_mode": "HTML"},
-            )
+            self._send_message(chat_id, text, parse_mode="HTML")
 
-    def _publish_status(self) -> None:
+    def _status_text(self, *, query: bool = False) -> str:
         with self._state_lock:
             elapsed = int(time.monotonic() - self._started)
             hours, remainder = divmod(elapsed, 3600)
             minutes, seconds = divmod(remainder, 60)
-            text = (
-                "<b>QUANT PIPELINE</b>\n"
-                f"<pre>{html.escape(self._status)}\n\nElapsed  {hours:02d}:{minutes:02d}:{seconds:02d}</pre>"
-            )[:4000]
-        for chat_id in self._chat_ids:
-            message_id = self._message_ids.get(chat_id)
+            status = self._query_status if query else self._status
+        return f"QUANT PIPELINE\n{status}\n\nElapsed  {hours:02d}:{minutes:02d}:{seconds:02d}"
+
+    def _publish_status(self, chat_ids: tuple[int, ...] | None = None) -> None:
+        status = self._status_text().removeprefix("QUANT PIPELINE\n")
+        text = f"<b>QUANT PIPELINE</b>\n<pre>{html.escape(status)}</pre>"[:4000]
+        for chat_id in chat_ids or self._chat_ids:
+            with self._state_lock:
+                message_id = self._message_ids.get(chat_id)
             result = (
                 self._post(
                     "editMessageText",
@@ -102,36 +120,108 @@ class PipelineNotifier:
                     json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
                 )
             if result:
-                self._message_ids[chat_id] = int(result["message_id"])
+                self._remember_message(chat_id, result)
+                with self._state_lock:
+                    self._message_ids[chat_id] = int(result["message_id"])
 
     def start_updates(self, status: str) -> None:
         if not self.enabled:
             return
         self.stop_updates()
         with self._state_lock:
-            self._status, self._started = status, time.monotonic()
-        self._message_ids.clear()
+            self._status = self._query_status = status
+            self._started = time.monotonic()
+            self._message_ids.clear()
+            self._sent_message_ids.clear()
+            self._command_offset = None
         self._stop.clear()
+        self._poll_commands(timeout=0)
         self._publish_status()
         self._thread = threading.Thread(target=self._update_loop, name="telegram-pipeline-updates", daemon=True)
         self._thread.start()
 
     def update(self, status: str) -> None:
         with self._state_lock:
-            self._status = status
+            self._status = self._query_status = status
 
-    def progress(self, status: str, current: int, total: int, started: float) -> None:
+    def track(self, status: str) -> None:
+        with self._state_lock:
+            self._query_status = status
+
+    @staticmethod
+    def _progress_status(status: str, current: int, total: int, started: float) -> str:
         elapsed = max(time.monotonic() - started, 1e-9)
         rate = current / elapsed
         eta = max(total - current, 0) / rate if rate else 0.0
-        self.update(
+        return (
             f"{status}\nProgress: {current:,}/{total:,} ({current / total:.1%}) | "
             f"{rate:,.1f} it/s | ETA: {eta:.0f}s"
         )
 
+    def progress(self, status: str, current: int, total: int, started: float) -> None:
+        self.update(self._progress_status(status, current, total, started))
+
+    def track_progress(self, status: str, current: int, total: int, started: float) -> None:
+        self.track(self._progress_status(status, current, total, started))
+
+    def _handle_command(self, chat_id: int, message_id: int, text: str) -> None:
+        if chat_id not in self._chat_ids or not text.startswith("/"):
+            return
+        command = text.split(maxsplit=1)[0].split("@", 1)[0].lower()
+        if command in {"/progress", "/status"}:
+            self._send_message(chat_id, self._status_text(query=True))
+        elif command == "/help":
+            self._send_message(
+                chat_id,
+                "Pipeline commands:\n/progress - current progress\n/status - current status\n"
+                "/clear - delete this run's bot messages\n/help - list commands",
+            )
+        elif command == "/clear":
+            with self._state_lock:
+                message_ids = set(self._sent_message_ids.pop(chat_id, set()))
+                self._message_ids.pop(chat_id, None)
+            message_ids.add(message_id)
+            for sent_message_id in sorted(message_ids):
+                self._post(
+                    "deleteMessage",
+                    json={"chat_id": chat_id, "message_id": sent_message_id},
+                )
+            self._publish_status((chat_id,))
+
+    def _poll_commands(self, *, timeout: int = 1) -> None:
+        offset = self._command_offset
+        result = self._post(
+            "getUpdates",
+            json={
+                "offset": -1 if offset is None else offset,
+                "timeout": timeout,
+                "allowed_updates": ["message"],
+            },
+        )
+        if not isinstance(result, list):
+            return
+        update_ids = [update.get("update_id") for update in result if isinstance(update, dict)]
+        update_ids = [int(update_id) for update_id in update_ids if isinstance(update_id, int)]
+        previous = -1 if offset is None else offset - 1
+        self._command_offset = max(update_ids, default=previous) + 1
+        if offset is None:
+            return
+        for update in result:
+            message = update.get("message") if isinstance(update, dict) else None
+            chat = message.get("chat") if isinstance(message, dict) else None
+            text = message.get("text") if isinstance(message, dict) else None
+            message_id = message.get("message_id") if isinstance(message, dict) else None
+            chat_id = chat.get("id") if isinstance(chat, dict) else None
+            if isinstance(chat_id, int) and isinstance(message_id, int) and isinstance(text, str):
+                self._handle_command(chat_id, message_id, text.strip())
+
     def _update_loop(self) -> None:
-        while not self._stop.wait(self._update_interval):
-            self._publish_status()
+        last_publish = time.monotonic()
+        while not self._stop.wait(0.25):
+            self._poll_commands()
+            if time.monotonic() - last_publish >= self._update_interval:
+                self._publish_status()
+                last_publish = time.monotonic()
 
     def stop_updates(self, final_status: str | None = None) -> None:
         thread, self._thread = self._thread, None
@@ -162,11 +252,12 @@ class PipelineNotifier:
         for chat_id in self._chat_ids:
             try:
                 with source.open("rb") as stream:
-                    self._post(
+                    result = self._post(
                         method,
                         data={"chat_id": chat_id, "caption": caption[:1024]},
                         files={field: (source.name, stream)},
                     )
+                    self._remember_message(chat_id, result)
             except OSError:
                 continue
 

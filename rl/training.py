@@ -586,12 +586,28 @@ class PufferCandidateRunner:
                 dynamic_ncols=True,
                 mininterval=0.5,
             ) as progress:
+                started = time.monotonic()
+                track_progress = getattr(self.notifier, "track_progress", None)
+                track_status = getattr(self.notifier, "track", None)
                 for evaluation, rollouts in enumerate(rollouts_by_evaluation, 1):
                     for _ in range(rollouts):
                         before = trainer.global_step
                         trainer.evaluate()
                         trainer.train()
                         progress.update(trainer.global_step - before)
+                        if track_progress:
+                            track_progress(
+                                f"{dataset.symbol} | {PUFFER_AGENT_NAME} | fold {dataset.fold + 1} | "
+                                f"seed {dataset.seed} | training {evaluation}/{self.evaluations}",
+                                int(progress.n),
+                                int(progress.total),
+                                started,
+                            )
+                    if track_status:
+                        track_status(
+                            f"{dataset.symbol} | {PUFFER_AGENT_NAME} | fold {dataset.fold + 1} | "
+                            f"seed {dataset.seed} | validation {evaluation}/{self.evaluations}"
+                        )
                     validation_returns = self._evaluate(
                         model, dataset, (dataset.validation_segment,)
                     )
@@ -753,6 +769,9 @@ class TrainingEngine:
             leave=False,
             dynamic_ncols=True,
         ):
+            track = getattr(self.notifier, "track", None)
+            if track:
+                track(f"{symbol} | feature preparation | fold {fold_number + 1}/{len(folds)}")
             train_indices, validation_indices = fold.train_indices, fold.validation_indices
             pipeline = CausalFeaturePipeline(
                 config_hash=self.config.config_hash,
@@ -849,6 +868,12 @@ class TrainingEngine:
             ) in prepared:
                 for seed in seeds:
                     jobs.set_postfix(fold=f"{fold_number + 1}/{len(folds)}", seed=seed)
+                    track = getattr(self.notifier, "track", None)
+                    if track:
+                        track(
+                            f"{symbol} | {PUFFER_AGENT_NAME} | fold {fold_number + 1}/{len(folds)} | "
+                            f"seed {seed} | starting"
+                        )
                     output_dir = self.config.models_dir / symbol.replace("/", "_") / algorithm / f"fold_{fold_number}" / f"seed_{seed}"
                     dataset = CandidateDataset(
                         symbol,
