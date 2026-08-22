@@ -38,6 +38,7 @@ from validation import (
 )
 
 from .candidates import (
+    PUFFER_ACTION_ENCODING,
     PUFFER_ALGORITHM,
     PUFFER_AGENT_NAME,
     PufferPolicyRunner,
@@ -400,6 +401,7 @@ class PufferCandidateRunner:
         randomize: bool = False,
         stress: bool = False,
         seed_offset: int = 0,
+        telegram_label: str | None = None,
     ) -> pd.Series:
         returns: list[pd.Series] = []
         for number, segment in enumerate(segments, 1):
@@ -418,7 +420,8 @@ class PufferCandidateRunner:
             started, last = time.monotonic(), 0.0
             status = (
                 f"{dataset.symbol} | {PUFFER_AGENT_NAME} | fold {dataset.fold + 1} | "
-                f"seed {dataset.seed} | evaluation segment {number}/{len(segments)}"
+                f"seed {dataset.seed} | {telegram_label or 'evaluation'} "
+                f"segment {number}/{len(segments)}"
             )
             with tqdm(
                 total=max(len(segment) - 1, 0),
@@ -437,12 +440,12 @@ class PufferCandidateRunner:
                     previous_equity = equity
                     progress.update()
                     now = time.monotonic()
-                    if now - last >= 1.0:
+                    if telegram_label and now - last >= 1.0:
                         publish = getattr(self.notifier, "progress", None)
                         if publish:
                             publish(status, int(progress.n), int(progress.total), started)
                         last = now
-                publish = getattr(self.notifier, "progress", None)
+                publish = getattr(self.notifier, "progress", None) if telegram_label else None
                 if publish and progress.total:
                     publish(status, int(progress.n), int(progress.total), started)
             returns.append(pd.Series(values, index=pd.DatetimeIndex(timestamps), dtype=float))
@@ -522,7 +525,7 @@ class PufferCandidateRunner:
             dataset,
             segments,
             environment_count,
-            rollout_count * self.bptt_horizon,
+            self.bptt_horizon,
         )
         model = build_puffer_policy(training_env)
         device = str(next(model.parameters()).device)
@@ -538,6 +541,7 @@ class PufferCandidateRunner:
                 "total_timesteps": total_steps + rollout_size,
                 "learning_rate": 3e-4,
                 "anneal_lr": False,
+                "min_lr_ratio": 1.0,
                 "gamma": 0.99,
                 "gae_lambda": 0.95,
                 "update_epochs": 10,
@@ -558,6 +562,7 @@ class PufferCandidateRunner:
                 "compile": False,
                 "compile_fullgraph": False,
                 "compile_mode": "default",
+                "amp": False,
                 "use_rnn": True,
                 "vtrace_rho_clip": 1.0,
                 "vtrace_c_clip": 1.0,
@@ -573,11 +578,6 @@ class PufferCandidateRunner:
         best_score = float("-inf")
         validation_scores: list[float] = []
         artifact = dataset.output_dir / "best_model.pt"
-        label = (
-            f"{dataset.symbol} | {PUFFER_AGENT_NAME} | fold {dataset.fold + 1} | "
-            f"seed {dataset.seed} | {environment_count} envs"
-        )
-        started = time.monotonic()
         try:
             with tqdm(
                 total=total_steps,
@@ -587,18 +587,11 @@ class PufferCandidateRunner:
                 mininterval=0.5,
             ) as progress:
                 for evaluation, rollouts in enumerate(rollouts_by_evaluation, 1):
-                    status = f"{label} | evaluation {evaluation}/{self.evaluations}"
                     for _ in range(rollouts):
                         before = trainer.global_step
                         trainer.evaluate()
                         trainer.train()
                         progress.update(trainer.global_step - before)
-                        publish = getattr(self.notifier, "progress", None)
-                        if publish:
-                            publish(status, int(progress.n), int(progress.total), started)
-                    update = getattr(self.notifier, "update", None)
-                    if update:
-                        update(f"{status} | validation")
                     validation_returns = self._evaluate(
                         model, dataset, (dataset.validation_segment,)
                     )
@@ -628,11 +621,10 @@ class PufferCandidateRunner:
         del trainer
         if device == "cuda":
             torch.cuda.empty_cache()
-        update = getattr(self.notifier, "update", None)
-        if update:
-            update(f"{label} | test evaluation")
         training_returns = self._evaluate(model, dataset, dataset.training_segments)
-        test_returns = self._evaluate(model, dataset, dataset.test_segments)
+        test_returns = self._evaluate(
+            model, dataset, dataset.test_segments, telegram_label="test evaluation"
+        )
         training_deterministic = self._evaluate_deterministic(dataset, dataset.training_segments)
         test_deterministic = self._evaluate_deterministic(dataset, dataset.test_segments)
         stress_returns = self._evaluate(
@@ -642,6 +634,7 @@ class PufferCandidateRunner:
             randomize=True,
             stress=True,
             seed_offset=10_000,
+            telegram_label="stress test",
         )
         return CandidateRun(
             tuple(test_returns.to_numpy()),
@@ -723,13 +716,6 @@ class TrainingEngine:
                 step_months=self.config.validation.step_months,
                 embargo_bars=self.config.validation.embargo_bars,
             )
-            if effective_train_months < self.config.validation.train_months:
-                update = getattr(self.notifier, "update", None)
-                if update:
-                    update(
-                        f"{symbol} | walk-forward training window adapted | "
-                        f"{self.config.validation.train_months}m -> {effective_train_months}m"
-                    )
             for training, validation, evaluation in windows:
                 train_indices = decision_data.index.get_indexer(training.index)
                 validation_indices = decision_data.index.get_indexer(validation.index)
@@ -760,7 +746,6 @@ class TrainingEngine:
         all_prior = np.arange(len(decision_data))
         prepared = []
         alpha_trial_ledger: list[dict[str, object]] = []
-        preparation_started = time.monotonic()
         for fold_number, fold in tqdm(
             enumerate(folds),
             total=len(folds),
@@ -768,9 +753,6 @@ class TrainingEngine:
             leave=False,
             dynamic_ncols=True,
         ):
-            update = getattr(self.notifier, "update", None)
-            if update:
-                update(f"{symbol} | feature preparation | fold {fold_number + 1}/{len(folds)}")
             train_indices, validation_indices = fold.train_indices, fold.validation_indices
             pipeline = CausalFeaturePipeline(
                 config_hash=self.config.config_hash,
@@ -838,14 +820,6 @@ class TrainingEngine:
                     str(alpha_path.resolve()),
                 )
             )
-            progress = getattr(self.notifier, "progress", None)
-            if progress:
-                progress(
-                    f"{symbol} | feature preparation | fold {fold_number + 1}/{len(folds)}",
-                    fold_number + 1,
-                    len(folds),
-                    preparation_started,
-                )
 
         candidates_by_algorithm: dict[str, list[dict[str, object]]] = {}
         trial_sharpes: list[float] = []
@@ -968,12 +942,6 @@ class TrainingEngine:
                             "artifact_path": artifact_path,
                         }
                     )
-                    update = getattr(self.notifier, "update", None)
-                    if update:
-                        update(
-                            f"{symbol} | {PUFFER_AGENT_NAME} | fold {fold_number + 1}/{len(folds)} | "
-                            f"seed {seed} complete"
-                        )
                     jobs.update()
             jobs.close()
             candidates_by_algorithm[algorithm] = candidates
@@ -1643,6 +1611,7 @@ class TrainingEngine:
                 "book": symbol.lower().replace("/", "_"),
                 "feature_order": list(report_candidate["feature_manifest"]["feature_order"]),
                 "action_contract": "target_exposure_long_cash_v1",
+                "policy_action_encoding": PUFFER_ACTION_ENCODING,
                 "observation_schema": "alpha_risk_state_v1",
                 "market_context": (
                     "binance_public_v1"

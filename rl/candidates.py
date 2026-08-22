@@ -11,9 +11,13 @@ import torch
 from gymnasium import spaces
 from torch import nn
 
+from .actions import TARGET_EXPOSURE_LEVELS
+
 
 PUFFER_ALGORITHM = "pufferl"
 PUFFER_AGENT_NAME = "PuffeRL-LSTM"
+PUFFER_ACTION_ENCODING = "categorical_target_exposure_11_v1"
+PUFFER_LEGACY_ACTION_ENCODING = "normal_target_exposure_v1"
 
 
 @lru_cache(maxsize=1)
@@ -64,6 +68,7 @@ def load_puffer_policy(
     observation_size: int,
     *,
     device: str | None = None,
+    action_encoding: str = PUFFER_LEGACY_ACTION_ENCODING,
 ) -> nn.Module:
     selected_device = device or _torch_device()
     observation_space = spaces.Box(
@@ -72,10 +77,16 @@ def load_puffer_policy(
         shape=(observation_size,),
         dtype=np.float32,
     )
+    if action_encoding == PUFFER_ACTION_ENCODING:
+        action_space = spaces.Discrete(len(TARGET_EXPOSURE_LEVELS))
+    elif action_encoding == PUFFER_LEGACY_ACTION_ENCODING:
+        action_space = spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32)
+    else:
+        raise ValueError(f"unsupported PuffeRL action encoding: {action_encoding}")
     specification = SimpleNamespace(
         single_observation_space=observation_space,
         observation_space=observation_space,
-        single_action_space=spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
+        single_action_space=action_space,
     )
     policy = build_puffer_policy(specification, device=selected_device)
     state = torch.load(Path(path), map_location=selected_device, weights_only=True)
@@ -86,7 +97,8 @@ def load_puffer_policy(
 class PufferPolicyRunner:
     def __init__(self, policy: nn.Module):
         self.policy = policy.eval()
-        self.action_space = policy.action_space
+        self.policy_action_space = policy.action_space
+        self.action_space = spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32)
         self.device = next(policy.parameters()).device
         self.reset()
 
@@ -104,7 +116,17 @@ class PufferPolicyRunner:
             self.reset()
         values = torch.as_tensor(observation, dtype=torch.float32, device=self.device).reshape(1, -1)
         with torch.inference_mode():
-            distribution, _ = self.policy.forward_eval(values, self.state)
-            action = distribution.loc if deterministic else distribution.sample()
+            logits, _ = self.policy.forward_eval(values, self.state)
+            if isinstance(logits, torch.Tensor):
+                if logits.shape[-1] != len(TARGET_EXPOSURE_LEVELS):
+                    raise ValueError("PuffeRL categorical action size is invalid")
+                action_index = (
+                    logits.argmax(dim=-1)
+                    if deterministic
+                    else torch.distributions.Categorical(logits=logits).sample()
+                )
+                action = action_index.to(torch.float32) / (len(TARGET_EXPOSURE_LEVELS) - 1)
+            else:
+                action = logits.loc if deterministic else logits.sample()
         result = action.clamp(0.0, 1.0).cpu().numpy()
-        return result[0]
+        return result.reshape(-1)

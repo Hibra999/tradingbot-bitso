@@ -46,7 +46,7 @@ Put secrets only in `.env` or the process environment. Data, model artifacts, SQ
 
 ## Research
 
-The safe default is a short, non-promotable verification run. Smoke uses one purged chronological fold, one seed, shorter feature warm-ups, and 100 Monte Carlo paths; its metrics are diagnostic only.
+The safe default is a short, non-promotable verification run. Smoke uses one purged chronological fold, one seed, shorter feature warm-ups, and 100 Monte Carlo paths; it deliberately skips PuffeRL training and its metrics are diagnostic only.
 
 ```bash
 python run_quant_pipeline.py
@@ -69,9 +69,9 @@ Full training and runtime validation belong on the external high-resource machin
 
 When Binance context is enabled, its first full run must use `--no-cache-only` to backfill the complete research window; later runs can return to the cache-only default. With the default disabled, existing Alpaca-only caches require no Binance download.
 
-Research outputs include per-symbol manifests plus separate training and evaluation QuantStats reports. Both reports compare PuffeRL-LSTM with cost-adjusted buy-and-hold and deterministic alpha; evaluation also includes volatility-matched buy-and-hold. A smoke manifest can never pass promotion.
+Research outputs include per-symbol manifests plus separate local training and evaluation QuantStats reports. Telegram sends only test/evaluation progress and the evaluation report. Both local reports compare PuffeRL-LSTM with cost-adjusted buy-and-hold and deterministic alpha; evaluation also includes volatility-matched buy-and-hold. A smoke manifest can never pass promotion.
 
-Each fold first fits Ridge and shallow gradient-boosted 4h/12h/24h alpha experts on training data only. PuffeRL-LSTM receives their forecasts and uncertainty plus observable risk state, and controls one long/cash target exposure. Evaluation uses configured commission and spread assumptions; stress replay doubles both, adds slippage, one-to-three-minute latency, and feature noise. Promotion requires positive alpha controls, paired superiority over deterministic alpha and volatility-matched buy-and-hold, CSCV PBO, a 90% model-confidence set, five-seed IQM bounds, and the existing risk gates.
+Each fold first fits Ridge and shallow gradient-boosted 4h/12h/24h alpha experts on training data only. PuffeRL-LSTM receives their forecasts and uncertainty plus observable risk state, and controls one long/cash target exposure through 11 bounded levels. Training repeatedly samples deterministic contiguous episodes from training segments, so increasing timesteps does not require a longer single history window. Evaluation uses configured commission and spread assumptions; stress replay doubles both, adds slippage, one-to-three-minute latency, and feature noise. Promotion requires positive alpha controls, paired superiority over deterministic alpha and volatility-matched buy-and-hold, CSCV PBO, a 90% model-confidence set, five-seed IQM bounds, and the existing risk gates.
 
 ## Approval and live safety
 

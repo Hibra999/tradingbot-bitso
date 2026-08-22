@@ -11,6 +11,7 @@ from pufferlib import PufferEnv
 from config import RLConfig
 from validation import DomainRandomizer, PerturbationConfig
 
+from .actions import TARGET_EXPOSURE_LEVELS
 from .execution_core import BracketExecutionCore
 
 
@@ -146,49 +147,57 @@ class PufferTradingEnv(PufferEnv):
     ):
         if not decision_segments or min(num_agents, episode_steps) < 1:
             raise ValueError("Puffer training requires segments, agents, and episode steps")
-        agent_segments: list[pd.DataFrame] = []
-        for index in range(num_agents):
-            segment_index = index % len(decision_segments)
-            segment = decision_segments[segment_index]
-            maximum_start = len(segment) - episode_steps - 1
-            if maximum_start < 0:
+        self._decision_segments = decision_segments
+        self._m1_bars = m1_bars
+        self._feature_columns = feature_columns
+        self._episode_steps = episode_steps
+        self._commission_rate = commission_rate
+        self._base_spread_bps = base_spread_bps
+        self._perturbation_config = perturbation_config
+        self._window_counts = tuple(
+            len(segment) - episode_steps for segment in decision_segments
+        )
+        for count in self._window_counts:
+            if count < 1:
                 raise ValueError(
                     f"Puffer training segments need at least {episode_steps + 1} H1 bars"
                 )
-            allocation_count = len(range(segment_index, num_agents, len(decision_segments)))
-            allocation_rank = index // len(decision_segments)
-            start = (
-                0
-                if allocation_count == 1
-                else round(maximum_start * allocation_rank / (allocation_count - 1))
-            )
-            agent_segments.append(segment.iloc[start : start + episode_steps + 1])
-        self.envs = [
-            BracketTradingEnvV2(
-                agent_segments[index],
-                m1_bars,
-                feature_columns,
-                action_mode="ppo",
-                randomize=True,
-                random_seed=random_seed + index,
-                allow_short=False,
-                commission_rate=commission_rate,
-                base_spread_bps=base_spread_bps,
-                perturbation_config=perturbation_config,
-            )
-            for index in range(num_agents)
-        ]
+        self.envs = [self._new_environment(random_seed + index) for index in range(num_agents)]
         self.num_agents = num_agents
         self.agents_per_batch = num_agents
         self.single_observation_space = self.envs[0].observation_space
-        self.single_action_space = self.envs[0].action_space
+        self.single_action_space = spaces.Discrete(len(TARGET_EXPOSURE_LEVELS))
         self._base_seed = int(random_seed)
         self._episodes = np.zeros(num_agents, dtype=np.int64)
         self._episode_returns = np.zeros(num_agents, dtype=np.float64)
         super().__init__()
 
+    def _new_environment(self, seed: int) -> BracketTradingEnvV2:
+        window = int(np.random.default_rng(seed).integers(sum(self._window_counts)))
+        for segment, count in zip(self._decision_segments, self._window_counts):
+            if window < count:
+                decision_bars = segment.iloc[window : window + self._episode_steps + 1]
+                break
+            window -= count
+        else:
+            raise RuntimeError("Puffer episode window selection failed")
+        return BracketTradingEnvV2(
+            decision_bars,
+            self._m1_bars,
+            self._feature_columns,
+            action_mode="ppo",
+            randomize=True,
+            random_seed=seed,
+            allow_short=False,
+            commission_rate=self._commission_rate,
+            base_spread_bps=self._base_spread_bps,
+            perturbation_config=self._perturbation_config,
+        )
+
     def _reset_agent(self, index: int) -> None:
         seed = self._base_seed + index + int(self._episodes[index]) * self.num_agents
+        self.envs[index].close()
+        self.envs[index] = self._new_environment(seed)
         observation, _ = self.envs[index].reset(seed=seed)
         self.observations[index] = observation
         self._episode_returns[index] = 0.0
@@ -206,12 +215,18 @@ class PufferTradingEnv(PufferEnv):
         return self.observations, []
 
     def step(self, actions: np.ndarray):
-        actions = np.asarray(actions, dtype=np.float32)
-        if actions.shape != (self.num_agents, 1) or not bool(np.isfinite(actions).all()):
-            raise ValueError("Puffer actions must be a finite (num_agents, 1) array")
+        actions = np.asarray(actions)
+        if (
+            actions.shape != (self.num_agents,)
+            or not np.issubdtype(actions.dtype, np.integer)
+            or bool(((actions < 0) | (actions >= len(TARGET_EXPOSURE_LEVELS))).any())
+        ):
+            raise ValueError("Puffer actions must be valid categorical exposure indices")
         infos: list[dict[str, float | int]] = []
         for index, action in enumerate(actions):
-            observation, reward, terminated, truncated, info = self.envs[index].step(action)
+            observation, reward, terminated, truncated, info = self.envs[index].step_target(
+                TARGET_EXPOSURE_LEVELS[int(action)]
+            )
             episode_end = terminated or truncated
             self.rewards[index] = reward
             self.terminals[index] = episode_end

@@ -38,6 +38,8 @@ def main() -> int:
         config = replace(config, cache_only=args.cache_only)
     notifier = PipelineNotifier()
     tqdm.write(f"Telegram progress: {'ON' if notifier.enabled else 'OFF'}")
+    if args.profile == "smoke":
+        tqdm.write("Smoke profile: structural verification only; PuffeRL training is skipped.")
 
     class SmokeRunner:
         def __call__(self, dataset) -> CandidateRun:
@@ -137,11 +139,6 @@ def main() -> int:
                         )
                     phase_bar.update()
                     phase_bar.set_postfix_str(f"{PUFFER_AGENT_NAME} training")
-                    notifier.notify_phase(
-                        "Training",
-                        symbol,
-                        f"{PUFFER_AGENT_NAME} | {len(decision):,} H1 bars",
-                    )
                     manifest = TrainingEngine(config, runner=runner, notifier=notifier).run_symbol(symbol, decision, m1)
                     phase_bar.update()
                     reporting = manifest.pop("_reporting")
@@ -157,7 +154,7 @@ def main() -> int:
                     notifier.notify_phase(
                         "Monte Carlo",
                         symbol,
-                        f"train + evaluation | {monte_carlo_paths:,} paths each",
+                        f"evaluation | {monte_carlo_paths:,} paths",
                     )
                     training_monte_carlo = moving_block_monte_carlo(
                         training_returns.to_numpy(),
@@ -196,12 +193,18 @@ def main() -> int:
                             "Vol B&H": reporting["evaluation_volatility_benchmark"],
                         },
                     )
-                    for split, report in (("training", training_report), ("evaluation", evaluation_report)):
-                        notifier.notify_html(report["telegram_report"])
-                        notifier.send_photo(report["graphics"], f"{symbol} {split} backtest graphics")
-                        notifier.send_document(report["html"], f"{symbol} {split} QuantStats report")
-                        if report["quantstats_error"]:
-                            notifier.notify(f"{symbol} {split} report warning | {report['quantstats_error']}")
+                    notifier.notify_html(evaluation_report["telegram_report"])
+                    notifier.send_photo(
+                        evaluation_report["graphics"], f"{symbol} evaluation backtest graphics"
+                    )
+                    notifier.send_document(
+                        evaluation_report["html"], f"{symbol} evaluation QuantStats report"
+                    )
+                    if evaluation_report["quantstats_error"]:
+                        notifier.notify(
+                            f"{symbol} evaluation report warning | "
+                            f"{evaluation_report['quantstats_error']}"
+                        )
                     phase_bar.update()
                 print(
                     json.dumps(

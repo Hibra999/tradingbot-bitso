@@ -27,13 +27,25 @@ class _FakePufferPolicy(nn.Module):
         return torch.distributions.Normal(mean, torch.ones_like(mean)), torch.zeros(1, 1)
 
 
+class _FakeCategoricalPolicy(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.anchor = nn.Parameter(torch.zeros(1))
+        self.action_space = spaces.Discrete(11)
+
+    def forward_eval(self, observations, state):
+        logits = torch.zeros((1, 11), device=observations.device)
+        logits[:, 7] = 1.0
+        return logits, torch.zeros(1, 1)
+
+
 class CandidateTests(unittest.TestCase):
     def test_puffer_policy_resets_lstm_state_on_episode_end(self) -> None:
         observation_space = spaces.Box(-np.inf, np.inf, shape=(3,), dtype=np.float32)
         environment = SimpleNamespace(
             single_observation_space=observation_space,
             observation_space=observation_space,
-            single_action_space=spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
+            single_action_space=spaces.Discrete(11),
         )
         policy = build_puffer_policy(environment, device="cpu")
         state = {"lstm_h": None, "lstm_c": None, "done": torch.zeros(1, dtype=torch.bool)}
@@ -55,6 +67,11 @@ class CandidateTests(unittest.TestCase):
             float(runner.predict(np.zeros(3), episode_start=True)[0]),
             0.25,
         )
+
+    def test_puffer_runner_maps_categorical_policy_to_public_exposure(self) -> None:
+        runner = PufferPolicyRunner(_FakeCategoricalPolicy())
+        self.assertEqual(runner.action_space.shape, (1,))
+        self.assertAlmostEqual(float(runner.predict(np.zeros(3))[0]), 0.7)
 
 
 if __name__ == "__main__":

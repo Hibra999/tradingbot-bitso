@@ -22,7 +22,12 @@ from quant import (
 )
 
 from .actions import target_exposure_intent
-from .candidates import PUFFER_ALGORITHM, PufferPolicyRunner, load_puffer_policy
+from .candidates import (
+    PUFFER_ALGORITHM,
+    PUFFER_LEGACY_ACTION_ENCODING,
+    PufferPolicyRunner,
+    load_puffer_policy,
+)
 
 
 @dataclass(frozen=True)
@@ -45,6 +50,9 @@ class LivePolicyRuntime:
             raise PermissionError("live policy requires a target-exposure artifact bundle")
         self.model_id = str(manifest["model_id"])
         self.algorithm = str(bundle["algorithm"])
+        self.policy_action_encoding = str(
+            bundle.get("policy_action_encoding", PUFFER_LEGACY_ACTION_ENCODING)
+        )
         self.book = str(bundle["book"])
         self.feature_z_limit = float(bundle.get("feature_z_limit", 10.0))
         if self.feature_z_limit <= 0:
@@ -99,7 +107,11 @@ class LivePolicyRuntime:
     def _load_model(self, path: str):
         if self.algorithm != PUFFER_ALGORITHM:
             raise ValueError(f"unsupported live algorithm: {self.algorithm}")
-        policy = load_puffer_policy(path, len(self.feature_order) + 7)
+        policy = load_puffer_policy(
+            path,
+            len(self.feature_order) + 7,
+            action_encoding=self.policy_action_encoding,
+        )
         return PufferPolicyRunner(policy)
 
     def _load_history(self) -> pd.DataFrame:

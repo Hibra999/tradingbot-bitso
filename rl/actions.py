@@ -11,6 +11,19 @@ from execution import TradeIntent
 
 _SAC_LOW = (-1.0, float(np.float32(0.005)), 1.0, 1.0)
 _SAC_HIGH = (1.0, 0.03, 3.5, 4.0)
+TARGET_EXPOSURE_LEVELS = (
+    0.0,
+    0.1,
+    0.2,
+    0.3,
+    0.4,
+    0.5,
+    0.6,
+    0.7,
+    0.8,
+    0.9,
+    1.0,
+)
 
 
 def _sac_action_values(action: np.ndarray | list[float] | tuple[float, float, float, float]) -> tuple[float, ...]:

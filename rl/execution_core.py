@@ -264,7 +264,13 @@ class BracketExecutionCore:
             raise ValueError("target exposure must be finite and in [0, 1]")
         if not 0.0 <= no_trade_band < 1.0 or not 0 < max_risk_fraction <= 1.0:
             raise ValueError("invalid target-exposure risk contract")
-        if abs(target - self.target_exposure) < no_trade_band:
+        exposure_change = abs(target - self.target_exposure)
+        if exposure_change < no_trade_band and not np.isclose(
+            exposure_change,
+            no_trade_band,
+            rtol=0.0,
+            atol=np.finfo(np.float32).eps,
+        ):
             target = self.target_exposure
         if target < no_trade_band:
             target = 0.0

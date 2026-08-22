@@ -93,11 +93,11 @@ class EnvironmentTests(unittest.TestCase):
         )
         observation, _ = environment.reset()
         self.assertEqual(observation.shape, (8,))
-        _, first_reward, _, _, first_info = environment.step(np.asarray([0.5], dtype=np.float32))
-        _, second_reward, _, truncated, second_info = environment.step(np.asarray([0.8], dtype=np.float32))
+        _, first_reward, _, _, first_info = environment.step(np.asarray([0.6], dtype=np.float32))
+        _, second_reward, _, truncated, second_info = environment.step(np.asarray([0.7], dtype=np.float32))
         self.assertTrue(np.isfinite(first_reward))
         self.assertTrue(np.isfinite(second_reward))
-        self.assertEqual(first_info["target_exposure"], 0.5)
+        self.assertAlmostEqual(first_info["target_exposure"], 0.6)
         self.assertTrue(truncated)
         self.assertEqual(second_info["target_exposure"], 0.0)
         self.assertEqual(environment.core.trades[0]["reason"], "signal")
@@ -131,10 +131,13 @@ class EnvironmentTests(unittest.TestCase):
         )
         observations, _ = environment.reset(seed=7)
         self.assertEqual(observations.shape, (2, 8))
+        self.assertEqual(environment.single_action_space.n, 11)
         self.assertIs(environment.envs[0].m1_bars, m1)
-        self.assertNotEqual(
-            environment.envs[0].decision_bars.index[0],
-            environment.envs[1].decision_bars.index[0],
+        windows = tuple(tuple(item.decision_bars.index) for item in environment.envs)
+        environment.reset(seed=7)
+        self.assertEqual(
+            windows,
+            tuple(tuple(item.decision_bars.index) for item in environment.envs),
         )
         self.assertTrue(
             np.shares_memory(
@@ -142,8 +145,13 @@ class EnvironmentTests(unittest.TestCase):
                 environment.envs[1].core._m1_open,
             )
         )
-        actions = np.zeros((2, 1), dtype=np.float32)
+        with self.assertRaisesRegex(ValueError, "categorical exposure indices"):
+            environment.step(np.zeros((2, 1), dtype=np.float32))
+        actions = np.asarray([5, 10], dtype=np.int64)
         environment.step(actions)
+        self.assertEqual(environment.envs[0].core.target_exposure, 0.5)
+        self.assertEqual(environment.envs[1].core.target_exposure, 1.0)
+        actions = np.zeros(2, dtype=np.int64)
         _, _, terminals, truncations, infos = environment.step(actions)
         self.assertTrue(bool(terminals.all()))
         self.assertFalse(bool(truncations.any()))

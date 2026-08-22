@@ -158,9 +158,10 @@ Telegram:
 - Must start automatically when running the pipeline if `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_CHAT_IDS` exist.
 - Must send the pipeline start notification.
 - Must periodically edit a single status message.
-- Must show phase, symbol, PuffeRL-LSTM agent, fold, seed, evaluation, progress, `it/s`, ETA, and elapsed time.
+- Must show test/evaluation phase, symbol, PuffeRL-LSTM agent, fold, seed, progress, `it/s`, ETA, and elapsed time.
+- Must not send training, feature-fitting, validation-checkpoint, or training-report messages.
 - Must report completion or failure.
-- Must send final reports, charts, and documents.
+- Must send final evaluation reports, charts, and documents; training reports remain local.
 - Must not stop the pipeline if Telegram fails.
 - Must not leak secrets.
 
@@ -175,13 +176,14 @@ The priority is reducing actual runtime, not artificially inflating `it/s`.
 Current situation:
 - PuffeRL-LSTM is the only training and live-inference agent.
 - Its native Puffer environment uses `RL_PUFFER_ENVS`, default 16, without duplicating the M1 dataframe.
-- Agents receive staggered chronological training windows and never recycle a segment within one candidate run.
+- Agents receive deterministic contiguous episodes resampled only from each fold's training segments.
 - The recurrent rollout uses `RL_PUFFER_BPTT_HORIZON`, default 256 steps per environment.
 - With 16 environments, it produces 4096 samples.
 - `RL_PUFFER_MINIBATCH_SIZE` defaults to 1024 and is aligned to complete recurrent sequences.
 - PyTorch enables TF32 for matmul and cuDNN.
 - Rollout buffers and model training stay on CUDA when available; `float32` preserves the CPU fallback.
 - PuffeRL uses ten PPO update epochs, preserving the prior on-policy update density.
+- PuffeRL uses an 11-level categorical target-exposure policy so PPO log-probabilities match the bounded actions executed by the environment.
 - The training environment avoids creating `Decimal`, `TradeIntent`, and `StepResult` at each timestep by using an internal primitive values route.
 - The public APIs of `TradeIntent` and `StepResult` must be preserved.
 
