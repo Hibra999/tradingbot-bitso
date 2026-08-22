@@ -9,7 +9,7 @@ from gymnasium import spaces
 from torch import nn
 
 from rl import PufferPolicyRunner, build_puffer_policy
-from rl.candidates import PUFFER_ACTION_ENCODING
+from rl.candidates import PUFFER_ACTION_ENCODING, PUFFER_MODAL_RESIDUAL_ACTION_ENCODING
 
 
 class _FakePufferPolicy(nn.Module):
@@ -29,14 +29,15 @@ class _FakePufferPolicy(nn.Module):
 
 
 class _FakeCategoricalPolicy(nn.Module):
-    def __init__(self):
+    def __init__(self, action_index: int = 7):
         super().__init__()
         self.anchor = nn.Parameter(torch.zeros(1))
         self.action_space = spaces.Discrete(11)
+        self.action_index = action_index
 
     def forward_eval(self, observations, state):
         logits = torch.zeros((1, 11), device=observations.device)
-        logits[:, 7] = 1.0
+        logits[:, self.action_index] = 1.0
         return logits, torch.zeros(1, 1)
 
 
@@ -53,6 +54,7 @@ class CandidateTests(unittest.TestCase):
         logits, _ = policy.forward_eval(torch.ones(1, 3), state)
         self.assertEqual(int(logits.argmax(dim=-1).item()), 5)
         self.assertGreater(float(torch.softmax(logits, dim=-1)[0, 5]), 0.6)
+        self.assertEqual(int(torch.count_nonzero(policy.policy.decoder.weight)), 0)
         self.assertFalse(
             bool(torch.allclose(state["lstm_h"], torch.zeros_like(state["lstm_h"])))
         )
@@ -80,10 +82,16 @@ class CandidateTests(unittest.TestCase):
         policy.action_encoding = PUFFER_ACTION_ENCODING
         observation = np.zeros(8, dtype=np.float32)
         observation[-8] = 0.4
-        self.assertAlmostEqual(
-            float(PufferPolicyRunner(policy).predict(observation)[0]),
-            0.6,
-        )
+        expected = float(PufferPolicyRunner(policy).predict(observation)[0])
+        self.assertGreater(expected, 0.4)
+        self.assertLess(expected, 0.6)
+
+        centered = _FakeCategoricalPolicy(5)
+        centered.action_encoding = PUFFER_ACTION_ENCODING
+        self.assertAlmostEqual(float(PufferPolicyRunner(centered).predict(observation)[0]), 0.4)
+
+        policy.action_encoding = PUFFER_MODAL_RESIDUAL_ACTION_ENCODING
+        self.assertAlmostEqual(float(PufferPolicyRunner(policy).predict(observation)[0]), 0.6)
 
 
 if __name__ == "__main__":

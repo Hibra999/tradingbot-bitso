@@ -633,7 +633,8 @@ class PufferCandidateRunner:
                     progress.set_postfix(
                         envs=environment_count,
                         evaluation=f"{evaluation}/{self.evaluations}",
-                        bestCE=f"{best_score:.4f}",
+                        currentCE=f"{score:+.6f}",
+                        bestCE=f"{best_score:+.6f}",
                         **_gpu_postfix(),
                     )
         finally:
@@ -1650,7 +1651,7 @@ class TrainingEngine:
                 "feature_order": list(report_candidate["feature_manifest"]["feature_order"]),
                 "action_contract": "target_exposure_long_cash_v1",
                 "policy_action_encoding": PUFFER_ACTION_ENCODING,
-                "observation_schema": "alpha_residual_risk_state_v2",
+                "observation_schema": "alpha_residual_expectation_risk_state_v3",
                 "market_context": (
                     "binance_public_v1"
                     if any(str(column).startswith("ctx_") for column in report_candidate["feature_manifest"]["feature_order"])

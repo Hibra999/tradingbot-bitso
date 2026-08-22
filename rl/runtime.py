@@ -28,6 +28,7 @@ from .candidates import (
     PUFFER_ACTION_ENCODING,
     PUFFER_ALGORITHM,
     PUFFER_LEGACY_ACTION_ENCODING,
+    PUFFER_MODAL_RESIDUAL_ACTION_ENCODING,
     PufferPolicyRunner,
     load_puffer_policy,
 )
@@ -62,7 +63,10 @@ class LivePolicyRuntime:
             raise PermissionError("feature drift limit must be positive")
         self.pipeline = CausalFeaturePipeline.load(bundle["feature_pipeline_path"])
         self.alpha = CausalAlphaEnsemble.load(bundle["alpha_pipeline_path"])
-        if self.policy_action_encoding == PUFFER_ACTION_ENCODING:
+        if self.policy_action_encoding in {
+            PUFFER_ACTION_ENCODING,
+            PUFFER_MODAL_RESIDUAL_ACTION_ENCODING,
+        }:
             expected_order = (
                 self.pipeline.feature_order
                 + ALPHA_FORECAST_COLUMNS
