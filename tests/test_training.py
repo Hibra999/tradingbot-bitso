@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from rl.training import _attach_scaled_features, _smoke_research_fold
+from rl.training import _attach_scaled_features, _full_walk_forward_windows, _smoke_research_fold
 
 
 class TrainingFeatureAssemblyTests(unittest.TestCase):
@@ -36,6 +36,24 @@ class TrainingFeatureAssemblyTests(unittest.TestCase):
         self.assertFalse(result.columns.has_duplicates)
         self.assertEqual(result["rv_60m"].tolist(), [-1.0, 1.0])
         self.assertEqual(result["Close"].tolist(), [100.0, 101.0])
+
+    def test_full_windows_adapt_to_minute_history_shorter_than_five_years(self) -> None:
+        index = pd.date_range("2022-01-01", "2025-04-02", freq="h", inclusive="left", tz="UTC")
+        frame = pd.DataFrame({"Close": np.ones(len(index))}, index=index)
+
+        windows, effective_train_months = _full_walk_forward_windows(
+            frame,
+            train_months=36,
+            validation_months=6,
+            evaluation_months=6,
+            step_months=6,
+            embargo_bars=24,
+        )
+
+        self.assertGreaterEqual(len(windows), 2)
+        self.assertGreaterEqual(effective_train_months, 12)
+        self.assertLess(effective_train_months, 36)
+        self.assertLess(windows[0][2].index.max(), windows[1][2].index.min())
 
 
 if __name__ == "__main__":

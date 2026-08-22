@@ -132,6 +132,45 @@ def _smoke_research_fold(
     return _ResearchFold(training, validation, outer.episode_segments, tuple(outer.test_groups))
 
 
+def _full_walk_forward_windows(
+    development: pd.DataFrame,
+    *,
+    train_months: int,
+    validation_months: int,
+    evaluation_months: int,
+    step_months: int,
+    embargo_bars: int,
+) -> tuple[list[tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]], int]:
+    minimum_train_months = min(train_months, 12)
+    if development.empty:
+        raise ValueError("full validation requires non-empty development data")
+    required_tail_months = validation_months + evaluation_months + step_months
+    start, end = development.index.min(), development.index.max()
+    effective_train_months = next(
+        (
+            months
+            for months in range(train_months, minimum_train_months - 1, -1)
+            if start + pd.DateOffset(months=months + required_tail_months) <= end
+        ),
+        None,
+    )
+    if effective_train_months is not None:
+        windows = make_sliding_folds(
+            development,
+            train_years=effective_train_months / 12,
+            val_months=validation_months,
+            test_months=evaluation_months,
+            step_months=step_months,
+            embargo_bars=embargo_bars,
+        )
+        if len(windows) >= 2:
+            return windows, effective_train_months
+    raise ValueError(
+        "full validation requires data for at least two complete walk-forward folds "
+        f"with a minimum {minimum_train_months}-month training window"
+    )
+
+
 @dataclass(frozen=True)
 class CandidateRun:
     returns: tuple[float, ...]
@@ -588,20 +627,28 @@ class TrainingEngine:
         ) / 10_000
         holdout_start: pd.Timestamp | None = None
         holdout_end: pd.Timestamp | None = None
+        effective_train_months: int | None = None
         folds: list[_ResearchFold] = []
         if self.config.profile == "full":
             latest = decision_data.index.max()
             holdout_end = pd.Timestamp(latest.year, latest.month, 1, tz=latest.tz)
             holdout_start = holdout_end - pd.DateOffset(months=self.config.validation.holdout_months)
             development = decision_data.loc[decision_data.index < holdout_start]
-            windows = make_sliding_folds(
+            windows, effective_train_months = _full_walk_forward_windows(
                 development,
-                train_years=self.config.validation.train_months / 12,
-                val_months=self.config.validation.validation_months,
-                test_months=self.config.validation.evaluation_months,
+                train_months=self.config.validation.train_months,
+                validation_months=self.config.validation.validation_months,
+                evaluation_months=self.config.validation.evaluation_months,
                 step_months=self.config.validation.step_months,
                 embargo_bars=self.config.validation.embargo_bars,
             )
+            if effective_train_months < self.config.validation.train_months:
+                update = getattr(self.notifier, "update", None)
+                if update:
+                    update(
+                        f"{symbol} | walk-forward training window adapted | "
+                        f"{self.config.validation.train_months}m -> {effective_train_months}m"
+                    )
             for training, validation, evaluation in windows:
                 train_indices = decision_data.index.get_indexer(training.index)
                 validation_indices = decision_data.index.get_indexer(validation.index)
@@ -616,8 +663,6 @@ class TrainingEngine:
                         (str(evaluation.index.min()), str(evaluation.index.max())),
                     )
                 )
-            if len(folds) < 2:
-                raise ValueError("full validation requires at least two complete walk-forward folds")
         else:
             folds.append(
                 _smoke_research_fold(
@@ -1558,7 +1603,10 @@ class TrainingEngine:
             "pbo": pbo,
             "validation_protocol": {
                 "outer": "rolling" if self.config.profile == "full" else "single-purged-cpcv-smoke",
-                "train_months": self.config.validation.train_months if self.config.profile == "full" else None,
+                "train_months": effective_train_months,
+                "requested_train_months": (
+                    self.config.validation.train_months if self.config.profile == "full" else None
+                ),
                 "validation_months": self.config.validation.validation_months if self.config.profile == "full" else None,
                 "evaluation_months": self.config.validation.evaluation_months if self.config.profile == "full" else None,
                 "step_months": self.config.validation.step_months if self.config.profile == "full" else None,
