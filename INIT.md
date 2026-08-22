@@ -1,7 +1,7 @@
 Act as a Senior Quant Developer specializing in reinforcement learning, backtesting, CUDA/PyTorch, and trading system optimization. You will work directly on this repository:
 
 VPS Path:
-`/home/gabo/portfolio/projects/29-predf`
+`/home/gabo/portfolio/projects/lol`
 
 GitHub Repository:
 `git@github.com:Hibra999/tradingbot-bitso.git`
