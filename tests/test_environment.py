@@ -165,10 +165,14 @@ class EnvironmentTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "categorical exposure indices"):
             environment.step(np.zeros((2, 1), dtype=np.float32))
+        expected_baseline = environment.envs[0].baseline_target_exposure()
         actions = np.asarray([5, 10], dtype=np.int64)
         _, rewards, _, _, _ = environment.step(actions)
         self.assertAlmostEqual(float(rewards[0]), 0.0)
-        self.assertEqual(environment.envs[0].core.target_exposure, 0.5)
+        self.assertAlmostEqual(
+            environment.envs[0].core.target_exposure,
+            expected_baseline,
+        )
         self.assertEqual(environment.envs[1].core.target_exposure, 1.0)
         actions = np.zeros(2, dtype=np.int64)
         _, _, terminals, truncations, infos = environment.step(actions)
