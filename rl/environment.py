@@ -9,6 +9,7 @@ from gymnasium import spaces
 from pufferlib import PufferEnv
 
 from config import RLConfig
+from quant import ALPHA_TARGET_COLUMN
 from validation import DomainRandomizer, PerturbationConfig
 
 from .actions import TARGET_EXPOSURE_LEVELS
@@ -34,6 +35,7 @@ class BracketTradingEnvV2(gym.Env):
         perturbation_config: PerturbationConfig | None = None,
         random_seed: int = 0,
         allow_short: bool = False,
+        reward_baseline_column: str | None = None,
     ):
         super().__init__()
         if base_spread < 0 or base_spread_bps < 0 or commission_rate < 0:
@@ -49,8 +51,16 @@ class BracketTradingEnvV2(gym.Env):
         self.base_spread_bps = base_spread_bps
         self.perturbation_config = perturbation_config
         self.allow_short = allow_short
+        if reward_baseline_column and reward_baseline_column not in decision_bars:
+            raise ValueError("reward baseline column is missing from decision bars")
+        self.reward_baseline_column = reward_baseline_column
         self._random_seed = int(random_seed)
         self.core = BracketExecutionCore(decision_bars, m1_bars, commission_rate=commission_rate)
+        self._baseline_core = (
+            BracketExecutionCore(decision_bars, m1_bars, commission_rate=commission_rate)
+            if reward_baseline_column
+            else None
+        )
         cfg = RLConfig()
         self._max_risk_fraction = cfg.risk_fractions[0]
         self._discrete_exposures = np.linspace(0.0, 1.0, 5, dtype=np.float32)
@@ -75,6 +85,8 @@ class BracketTradingEnvV2(gym.Env):
         super().reset(seed=seed)
         self.index = 0
         self.core.reset()  # every disjoint CPCV segment starts flat
+        if self._baseline_core:
+            self._baseline_core.reset()
         features = self.decision_bars[self.feature_columns]
         base_spreads = (
             np.full(len(features), self.base_spread)
@@ -99,6 +111,17 @@ class BracketTradingEnvV2(gym.Env):
         )
         return self._observation(), {}
 
+    def baseline_target_exposure(self) -> float:
+        if not self.reward_baseline_column:
+            raise RuntimeError("environment has no reward baseline")
+        return float(
+            np.clip(
+                self.episode_features[self.reward_baseline_column].iloc[self.index],
+                0.0,
+                1.0,
+            )
+        )
+
     def step(self, action):
         if self.action_mode in {"ppo", "sac"}:
             values = np.asarray(action, dtype=float).reshape(-1)
@@ -121,6 +144,16 @@ class BracketTradingEnvV2(gym.Env):
             slippage=float(self.slippages[self.index]),
             latency_ticks=int(self.latencies[self.index]),
         )
+        if self._baseline_core:
+            baseline_reward, _, _ = self._baseline_core.execute_target_exposure(
+                self.index,
+                self.baseline_target_exposure(),
+                max_risk_fraction=self._max_risk_fraction,
+                spread=float(self.spreads[self.index]),
+                slippage=float(self.slippages[self.index]),
+                latency_ticks=int(self.latencies[self.index]),
+            )
+            reward -= baseline_reward
         self.index += 1
         truncated = self.index >= len(self.decision_bars) - 1
         observation = np.zeros(self.observation_space.shape, dtype=np.float32) if truncated else self._observation()
@@ -147,6 +180,8 @@ class PufferTradingEnv(PufferEnv):
     ):
         if not decision_segments or min(num_agents, episode_steps) < 1:
             raise ValueError("Puffer training requires segments, agents, and episode steps")
+        if ALPHA_TARGET_COLUMN not in feature_columns:
+            raise ValueError("Puffer residual training requires causal alpha exposure")
         self._decision_segments = decision_segments
         self._m1_bars = m1_bars
         self._feature_columns = feature_columns
@@ -192,6 +227,7 @@ class PufferTradingEnv(PufferEnv):
             commission_rate=self._commission_rate,
             base_spread_bps=self._base_spread_bps,
             perturbation_config=self._perturbation_config,
+            reward_baseline_column=ALPHA_TARGET_COLUMN,
         )
 
     def _reset_agent(self, index: int) -> None:
@@ -224,8 +260,10 @@ class PufferTradingEnv(PufferEnv):
             raise ValueError("Puffer actions must be valid categorical exposure indices")
         infos: list[dict[str, float | int]] = []
         for index, action in enumerate(actions):
+            environment = self.envs[index]
+            residual = int(action) / (len(TARGET_EXPOSURE_LEVELS) - 1) - 0.5
             observation, reward, terminated, truncated, info = self.envs[index].step_target(
-                TARGET_EXPOSURE_LEVELS[int(action)]
+                float(np.clip(environment.baseline_target_exposure() + residual, 0.0, 1.0))
             )
             episode_end = terminated or truncated
             self.rewards[index] = reward

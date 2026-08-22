@@ -111,6 +111,7 @@ class EnvironmentTests(unittest.TestCase):
                 "Close": [100.0] * 5,
                 "atr": [1.0] * 5,
                 "feature": [0.0] * 5,
+                "alpha_target_exposure": [0.5] * 5,
             },
             index=pd.date_range("2025-01-01 01:00", periods=5, freq="h", tz="UTC"),
         )
@@ -121,16 +122,16 @@ class EnvironmentTests(unittest.TestCase):
         environment = PufferTradingEnv(
             (decisions,),
             m1,
-            ["feature"],
+            ["feature", "alpha_target_exposure"],
             num_agents=2,
             episode_steps=2,
             random_seed=7,
-            commission_rate=0.0,
+            commission_rate=0.001,
             base_spread_bps=0.0,
             perturbation_config=PerturbationConfig(),
         )
         observations, _ = environment.reset(seed=7)
-        self.assertEqual(observations.shape, (2, 8))
+        self.assertEqual(observations.shape, (2, 9))
         self.assertEqual(environment.single_action_space.n, 11)
         self.assertIs(environment.envs[0].m1_bars, m1)
         windows = tuple(tuple(item.decision_bars.index) for item in environment.envs)
@@ -148,7 +149,8 @@ class EnvironmentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "categorical exposure indices"):
             environment.step(np.zeros((2, 1), dtype=np.float32))
         actions = np.asarray([5, 10], dtype=np.int64)
-        environment.step(actions)
+        _, rewards, _, _, _ = environment.step(actions)
+        self.assertAlmostEqual(float(rewards[0]), 0.0)
         self.assertEqual(environment.envs[0].core.target_exposure, 0.5)
         self.assertEqual(environment.envs[1].core.target_exposure, 1.0)
         actions = np.zeros(2, dtype=np.int64)

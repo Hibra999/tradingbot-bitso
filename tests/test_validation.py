@@ -32,6 +32,7 @@ class ValidationTests(unittest.TestCase):
         first = DomainRandomizer(42).perturb(features, atr, 0.5)
         second = DomainRandomizer(42).perturb(features, atr, 0.5)
         np.testing.assert_allclose(first.features, second.features)
+        np.testing.assert_array_equal(first.features, features)
         np.testing.assert_allclose(first.spread, second.spread)
         self.assertTrue(bool(((first.latency_ticks >= 1) & (first.latency_ticks <= 3)).all()))
 

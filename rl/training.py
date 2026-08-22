@@ -529,6 +529,15 @@ class PufferCandidateRunner:
         )
         model = build_puffer_policy(training_env)
         device = str(next(model.parameters()).device)
+        artifact = dataset.output_dir / "best_model.pt"
+        validation_returns = self._evaluate(model, dataset, (dataset.validation_segment,))
+        initial_score = _certainty_equivalent(validation_returns, validation_baseline)
+        if not np.isfinite(initial_score) or abs(initial_score) > 1e-4:
+            raise RuntimeError("zero-residual PuffeRL policy does not reproduce the alpha baseline")
+        best_score = 0.0
+        validation_scores = [sharpe_ratio(validation_returns.dropna().to_numpy())]
+        torch.save(model.state_dict(), artifact)
+        model.train()
         trainer = PuffeRL(
             {
                 "env": "tradingbot_bitso",
@@ -575,9 +584,6 @@ class PufferCandidateRunner:
         trainer.print_dashboard = lambda *args, **kwargs: None  # tqdm owns terminal rendering.
         if device == "cuda":
             torch.backends.cudnn.benchmark = False
-        best_score = float("-inf")
-        validation_scores: list[float] = []
-        artifact = dataset.output_dir / "best_model.pt"
         try:
             with tqdm(
                 total=total_steps,
@@ -615,7 +621,7 @@ class PufferCandidateRunner:
                     validation_scores.append(
                         sharpe_ratio(validation_returns.dropna().to_numpy())
                     )
-                    if evaluation == 1 or np.isfinite(score) and (
+                    if np.isfinite(score) and (
                         not np.isfinite(best_score) or score > best_score
                     ):
                         best_score = score
@@ -624,7 +630,7 @@ class PufferCandidateRunner:
                     progress.set_postfix(
                         envs=environment_count,
                         evaluation=f"{evaluation}/{self.evaluations}",
-                        best=f"{best_score:.4f}",
+                        best_ce_alpha=f"{best_score:.4f}",
                         **_gpu_postfix(),
                     )
         finally:
@@ -809,7 +815,7 @@ class TrainingEngine:
                 / f"fold_{fold_number}_alpha.pkl"
             )
             alpha.save(alpha_path)
-            feature_order = pipeline.feature_order + ALPHA_FORECAST_COLUMNS
+            feature_order = pipeline.feature_order + ALPHA_FORECAST_COLUMNS + (ALPHA_TARGET_COLUMN,)
             feature_manifest = pipeline.manifest()
             feature_manifest["feature_order"] = list(feature_order)
             feature_manifest["alpha"] = alpha.manifest()
@@ -1341,7 +1347,11 @@ class TrainingEngine:
                 alpha_path = self.config.models_dir / symbol.replace("/", "_") / "final" / "alpha.pkl"
                 final_pipeline.save(feature_path)
                 final_alpha.save(alpha_path)
-                final_feature_order = final_pipeline.feature_order + ALPHA_FORECAST_COLUMNS
+                final_feature_order = (
+                    final_pipeline.feature_order
+                    + ALPHA_FORECAST_COLUMNS
+                    + (ALPHA_TARGET_COLUMN,)
+                )
                 final_feature_manifest = final_pipeline.manifest()
                 final_feature_manifest["feature_order"] = list(final_feature_order)
                 final_feature_manifest["alpha"] = final_alpha.manifest()
@@ -1637,7 +1647,7 @@ class TrainingEngine:
                 "feature_order": list(report_candidate["feature_manifest"]["feature_order"]),
                 "action_contract": "target_exposure_long_cash_v1",
                 "policy_action_encoding": PUFFER_ACTION_ENCODING,
-                "observation_schema": "alpha_risk_state_v1",
+                "observation_schema": "alpha_residual_risk_state_v2",
                 "market_context": (
                     "binance_public_v1"
                     if any(str(column).startswith("ctx_") for column in report_candidate["feature_manifest"]["feature_order"])

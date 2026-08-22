@@ -9,6 +9,7 @@ from gymnasium import spaces
 from torch import nn
 
 from rl import PufferPolicyRunner, build_puffer_policy
+from rl.candidates import PUFFER_ACTION_ENCODING
 
 
 class _FakePufferPolicy(nn.Module):
@@ -49,7 +50,9 @@ class CandidateTests(unittest.TestCase):
         )
         policy = build_puffer_policy(environment, device="cpu")
         state = {"lstm_h": None, "lstm_c": None, "done": torch.zeros(1, dtype=torch.bool)}
-        policy.forward_eval(torch.ones(1, 3), state)
+        logits, _ = policy.forward_eval(torch.ones(1, 3), state)
+        self.assertEqual(int(logits.argmax(dim=-1).item()), 5)
+        self.assertGreater(float(torch.softmax(logits, dim=-1)[0, 5]), 0.6)
         self.assertFalse(
             bool(torch.allclose(state["lstm_h"], torch.zeros_like(state["lstm_h"])))
         )
@@ -72,6 +75,15 @@ class CandidateTests(unittest.TestCase):
         runner = PufferPolicyRunner(_FakeCategoricalPolicy())
         self.assertEqual(runner.action_space.shape, (1,))
         self.assertAlmostEqual(float(runner.predict(np.zeros(3))[0]), 0.7)
+
+        policy = _FakeCategoricalPolicy()
+        policy.action_encoding = PUFFER_ACTION_ENCODING
+        observation = np.zeros(8, dtype=np.float32)
+        observation[-8] = 0.4
+        self.assertAlmostEqual(
+            float(PufferPolicyRunner(policy).predict(observation)[0]),
+            0.6,
+        )
 
 
 if __name__ == "__main__":

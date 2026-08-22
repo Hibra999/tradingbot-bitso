@@ -16,7 +16,8 @@ from .actions import TARGET_EXPOSURE_LEVELS
 
 PUFFER_ALGORITHM = "pufferl"
 PUFFER_AGENT_NAME = "PuffeRL-LSTM"
-PUFFER_ACTION_ENCODING = "categorical_target_exposure_11_v1"
+PUFFER_ACTION_ENCODING = "categorical_alpha_residual_11_v1"
+PUFFER_ABSOLUTE_ACTION_ENCODING = "categorical_target_exposure_11_v1"
 PUFFER_LEGACY_ACTION_ENCODING = "normal_target_exposure_v1"
 
 
@@ -40,7 +41,12 @@ def require_pufferlib() -> None:
         raise RuntimeError(f"PuffeRL is pinned to PufferLib 3.0.0, found {installed}")
 
 
-def build_puffer_policy(env: Any, *, device: str | None = None) -> nn.Module:
+def build_puffer_policy(
+    env: Any,
+    *,
+    device: str | None = None,
+    action_encoding: str = PUFFER_ACTION_ENCODING,
+) -> nn.Module:
     require_pufferlib()
     from pufferlib.models import Default, LSTMWrapper
 
@@ -59,7 +65,19 @@ def build_puffer_policy(env: Any, *, device: str | None = None) -> nn.Module:
         input_size=128,
         hidden_size=128,
     )
+    if action_encoding == PUFFER_ACTION_ENCODING:
+        decoder = policy.policy.decoder
+        nn.init.orthogonal_(decoder.weight, gain=0.01)
+        nn.init.zeros_(decoder.bias)
+        with torch.no_grad():
+            decoder.bias[len(TARGET_EXPOSURE_LEVELS) // 2] = 3.0
+    elif action_encoding not in {
+        PUFFER_ABSOLUTE_ACTION_ENCODING,
+        PUFFER_LEGACY_ACTION_ENCODING,
+    }:
+        raise ValueError(f"unsupported PuffeRL action encoding: {action_encoding}")
     policy.action_space = env.single_action_space
+    policy.action_encoding = action_encoding
     return policy.to(device or _torch_device())
 
 
@@ -77,7 +95,7 @@ def load_puffer_policy(
         shape=(observation_size,),
         dtype=np.float32,
     )
-    if action_encoding == PUFFER_ACTION_ENCODING:
+    if action_encoding in {PUFFER_ACTION_ENCODING, PUFFER_ABSOLUTE_ACTION_ENCODING}:
         action_space = spaces.Discrete(len(TARGET_EXPOSURE_LEVELS))
     elif action_encoding == PUFFER_LEGACY_ACTION_ENCODING:
         action_space = spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32)
@@ -88,7 +106,11 @@ def load_puffer_policy(
         observation_space=observation_space,
         single_action_space=action_space,
     )
-    policy = build_puffer_policy(specification, device=selected_device)
+    policy = build_puffer_policy(
+        specification,
+        device=selected_device,
+        action_encoding=action_encoding,
+    )
     state = torch.load(Path(path), map_location=selected_device, weights_only=True)
     policy.load_state_dict(state)
     return policy.eval()
@@ -98,6 +120,11 @@ class PufferPolicyRunner:
     def __init__(self, policy: nn.Module):
         self.policy = policy.eval()
         self.policy_action_space = policy.action_space
+        self.action_encoding = getattr(
+            policy,
+            "action_encoding",
+            PUFFER_ABSOLUTE_ACTION_ENCODING,
+        )
         self.action_space = spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32)
         self.device = next(policy.parameters()).device
         self.reset()
@@ -125,7 +152,13 @@ class PufferPolicyRunner:
                     if deterministic
                     else torch.distributions.Categorical(logits=logits).sample()
                 )
-                action = action_index.to(torch.float32) / (len(TARGET_EXPOSURE_LEVELS) - 1)
+                normalized = action_index.to(torch.float32) / (len(TARGET_EXPOSURE_LEVELS) - 1)
+                if self.action_encoding == PUFFER_ACTION_ENCODING:
+                    if observation.size < 8:
+                        raise ValueError("residual PuffeRL observation is missing alpha exposure")
+                    action = normalized - 0.5 + float(observation[-8])
+                else:
+                    action = normalized
             else:
                 action = logits.loc if deterministic else logits.sample()
         result = action.clamp(0.0, 1.0).cpu().numpy()

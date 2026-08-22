@@ -47,6 +47,8 @@ class DomainRandomizer:
             size=len(features),
         )
         slippage = atr.to_numpy(dtype=float) * self.rng.uniform(0, cfg.slippage_atr_fraction, len(features))
-        noisy = features.astype(float) + self.rng.normal(0, cfg.feature_noise_sigma, features.shape)
+        noisy = features.astype(float) * (
+            1 + self.rng.normal(0, cfg.feature_noise_sigma, features.shape)
+        )
         latency = self.rng.integers(cfg.min_latency_ticks, cfg.max_latency_ticks + 1, len(features))
         return RandomizedEpisode(noisy, spread, slippage, latency)

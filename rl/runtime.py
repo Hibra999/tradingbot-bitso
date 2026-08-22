@@ -12,6 +12,7 @@ from data import bar_metadata, load_binance_context, read_parquet, resample_ohlc
 from execution import TradeIntent
 from quant import (
     ALPHA_FORECAST_COLUMNS,
+    ALPHA_TARGET_COLUMN,
     CausalAlphaEnsemble,
     HAR_RV_COLUMNS,
     CausalFeaturePipeline,
@@ -23,6 +24,8 @@ from quant import (
 
 from .actions import target_exposure_intent
 from .candidates import (
+    PUFFER_ABSOLUTE_ACTION_ENCODING,
+    PUFFER_ACTION_ENCODING,
     PUFFER_ALGORITHM,
     PUFFER_LEGACY_ACTION_ENCODING,
     PufferPolicyRunner,
@@ -59,7 +62,19 @@ class LivePolicyRuntime:
             raise PermissionError("feature drift limit must be positive")
         self.pipeline = CausalFeaturePipeline.load(bundle["feature_pipeline_path"])
         self.alpha = CausalAlphaEnsemble.load(bundle["alpha_pipeline_path"])
-        expected_order = self.pipeline.feature_order + ALPHA_FORECAST_COLUMNS
+        if self.policy_action_encoding == PUFFER_ACTION_ENCODING:
+            expected_order = (
+                self.pipeline.feature_order
+                + ALPHA_FORECAST_COLUMNS
+                + (ALPHA_TARGET_COLUMN,)
+            )
+        elif self.policy_action_encoding in {
+            PUFFER_ABSOLUTE_ACTION_ENCODING,
+            PUFFER_LEGACY_ACTION_ENCODING,
+        }:
+            expected_order = self.pipeline.feature_order + ALPHA_FORECAST_COLUMNS
+        else:
+            raise PermissionError("live policy action encoding is unsupported")
         if tuple(bundle.get("feature_order", ())) != expected_order:
             raise PermissionError("manifest, feature, and alpha artifact orders do not match")
         if self.alpha.feature_order != self.pipeline.feature_order:
@@ -203,7 +218,7 @@ class LivePolicyRuntime:
         if current.index[-1] not in features.index:
             return None
         forecasts = self.alpha.transform(features, round_trip_cost=self.round_trip_cost)
-        combined = features.join(forecasts.loc[:, ALPHA_FORECAST_COLUMNS])
+        combined = features.join(forecasts)
         feature_values = combined.loc[current.index[-1], self.feature_order].to_numpy(dtype=np.float32)
         if not bool(np.isfinite(feature_values).all()) or float(np.max(np.abs(feature_values))) > self.feature_z_limit:
             raise RuntimeError("live feature drift exceeded the approved artifact limit")

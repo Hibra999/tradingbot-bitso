@@ -185,7 +185,7 @@ Current situation:
 - PyTorch enables TF32 for matmul and cuDNN.
 - Rollout buffers and model training stay on CUDA when available; `float32` preserves the CPU fallback.
 - PuffeRL uses ten PPO update epochs, preserving the prior on-policy update density.
-- PuffeRL uses an 11-level categorical target-exposure policy so PPO log-probabilities match the bounded actions executed by the environment.
+- PuffeRL uses an 11-level categorical residual policy around the causal alpha target so PPO log-probabilities match the bounded actions executed by the environment; its zero-residual checkpoint is the validation incumbent.
 - The training environment avoids creating `Decimal`, `TradeIntent`, and `StepResult` at each timestep by using an internal primitive values route.
 - The public APIs of `TradeIntent` and `StepResult` must be preserved.
 

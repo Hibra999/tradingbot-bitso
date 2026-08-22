@@ -9,8 +9,9 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-from quant import ALPHA_FORECAST_COLUMNS
+from quant import ALPHA_FORECAST_COLUMNS, ALPHA_TARGET_COLUMN
 from rl import LivePolicyRuntime
+from rl.candidates import PUFFER_ACTION_ENCODING
 
 
 class _Pipeline:
@@ -38,10 +39,9 @@ class _Alpha:
     feature_order = ("feature",)
 
     def transform(self, features, *, round_trip_cost):
-        return pd.DataFrame(
-            {column: [0.0] for column in (*ALPHA_FORECAST_COLUMNS, "alpha_target_exposure")},
-            index=features.index,
-        )
+        values = {column: [0.0] for column in ALPHA_FORECAST_COLUMNS}
+        values[ALPHA_TARGET_COLUMN] = [0.3]
+        return pd.DataFrame(values, index=features.index)
 
 
 class RuntimeTests(unittest.TestCase):
@@ -56,7 +56,8 @@ class RuntimeTests(unittest.TestCase):
                 "model_path": "model.pt",
                 "feature_pipeline_path": "features.pkl",
                 "alpha_pipeline_path": "alpha.pkl",
-                "feature_order": ["feature", *ALPHA_FORECAST_COLUMNS],
+                "policy_action_encoding": PUFFER_ACTION_ENCODING,
+                "feature_order": ["feature", *ALPHA_FORECAST_COLUMNS, ALPHA_TARGET_COLUMN],
             },
         }
         decision_index = pd.date_range("2025-01-01", periods=2, freq="h", tz="UTC")
@@ -91,6 +92,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result.intent.direction, 0)
         self.assertEqual(result.decision_time, decision_index[-1])
+        self.assertAlmostEqual(float(runtime.model.last_observation[-8]), 0.3)
         self.assertAlmostEqual(float(runtime.model.last_observation[-7]), 0.4)
         self.assertAlmostEqual(float(runtime.model.last_observation[-5]), 0.02)
 
