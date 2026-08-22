@@ -164,7 +164,7 @@ Telegram:
 - Must send final evaluation reports, charts, and documents; training reports remain local.
 - Must not stop the pipeline if Telegram fails.
 - Must not leak secrets.
-- Authorized chats may request on-demand progress with `/progress` or `/status`, list commands with `/help`, and clear messages tracked during the current run with `/clear`.
+- Authorized chats may use status-message buttons or `/progress`, `/status`, `/help`, and `/clear` commands to inspect progress and clear messages tracked during the current run.
 - Only one polling process may use a bot token at a time; pipeline and live-service polling require separate tokens or non-overlapping runtimes.
 
 The current notifier uses an update thread and the Telegram Bot API via `httpx`. Reuse it; do not create another parallel system unless necessary.

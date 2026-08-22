@@ -98,27 +98,37 @@ class PipelineNotifier:
     def _publish_status(self, chat_ids: tuple[int, ...] | None = None) -> None:
         status = self._status_text().removeprefix("QUANT PIPELINE\n")
         text = f"<b>QUANT PIPELINE</b>\n<pre>{html.escape(status)}</pre>"[:4000]
+        reply_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "Progress", "callback_data": "pipeline:progress"},
+                    {"text": "Status", "callback_data": "pipeline:status"},
+                ],
+                [
+                    {"text": "Help", "callback_data": "pipeline:help"},
+                    {"text": "Clear", "callback_data": "pipeline:clear"},
+                ],
+            ]
+        }
         for chat_id in chat_ids or self._chat_ids:
             with self._state_lock:
                 message_id = self._message_ids.get(chat_id)
+            payload: dict[str, object] = {
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "reply_markup": reply_markup,
+            }
+            if message_id:
+                payload["message_id"] = message_id
             result = (
-                self._post(
-                    "editMessageText",
-                    json={
-                        "chat_id": chat_id,
-                        "message_id": message_id,
-                        "text": text,
-                        "parse_mode": "HTML",
-                    },
-                )
+                self._post("editMessageText", json=payload)
                 if message_id
                 else None
             )
             if result is None:
-                result = self._post(
-                    "sendMessage",
-                    json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
-                )
+                payload.pop("message_id", None)
+                result = self._post("sendMessage", json=payload)
             if result:
                 self._remember_message(chat_id, result)
                 with self._state_lock:
@@ -188,6 +198,19 @@ class PipelineNotifier:
                 )
             self._publish_status((chat_id,))
 
+    def _handle_callback(
+        self,
+        chat_id: int,
+        message_id: int,
+        callback_id: str,
+        data: str,
+    ) -> None:
+        command = data.removeprefix("pipeline:")
+        if chat_id not in self._chat_ids or command not in {"progress", "status", "help", "clear"}:
+            return
+        self._post("answerCallbackQuery", json={"callback_query_id": callback_id})
+        self._handle_command(chat_id, message_id, f"/{command}")
+
     def _poll_commands(self, *, timeout: int = 1) -> None:
         offset = self._command_offset
         result = self._post(
@@ -195,7 +218,7 @@ class PipelineNotifier:
             json={
                 "offset": -1 if offset is None else offset,
                 "timeout": timeout,
-                "allowed_updates": ["message"],
+                "allowed_updates": ["message", "callback_query"],
             },
         )
         if not isinstance(result, list):
@@ -214,6 +237,33 @@ class PipelineNotifier:
             chat_id = chat.get("id") if isinstance(chat, dict) else None
             if isinstance(chat_id, int) and isinstance(message_id, int) and isinstance(text, str):
                 self._handle_command(chat_id, message_id, text.strip())
+            callback = update.get("callback_query") if isinstance(update, dict) else None
+            callback_message = callback.get("message") if isinstance(callback, dict) else None
+            callback_chat = (
+                callback_message.get("chat") if isinstance(callback_message, dict) else None
+            )
+            callback_id = callback.get("id") if isinstance(callback, dict) else None
+            callback_data = callback.get("data") if isinstance(callback, dict) else None
+            callback_message_id = (
+                callback_message.get("message_id")
+                if isinstance(callback_message, dict)
+                else None
+            )
+            callback_chat_id = (
+                callback_chat.get("id") if isinstance(callback_chat, dict) else None
+            )
+            if (
+                isinstance(callback_chat_id, int)
+                and isinstance(callback_message_id, int)
+                and isinstance(callback_id, str)
+                and isinstance(callback_data, str)
+            ):
+                self._handle_callback(
+                    callback_chat_id,
+                    callback_message_id,
+                    callback_id,
+                    callback_data,
+                )
 
     def _update_loop(self) -> None:
         last_publish = time.monotonic()

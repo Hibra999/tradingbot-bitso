@@ -203,7 +203,7 @@ def main() -> int:
                             f"{evaluation_report['quantstats_error']}"
                         )
                     phase_bar.update()
-                print(
+                tqdm.write(
                     json.dumps(
                         {
                             "symbol": symbol,

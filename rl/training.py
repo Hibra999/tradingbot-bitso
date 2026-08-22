@@ -425,7 +425,10 @@ class PufferCandidateRunner:
             )
             with tqdm(
                 total=max(len(segment) - 1, 0),
-                desc=f"Evaluation {number}/{len(segments)}",
+                desc=(
+                    f"{dataset.symbol} {PUFFER_AGENT_NAME} f{dataset.fold + 1} "
+                    f"s{dataset.seed} {telegram_label or 'validation'} {number}/{len(segments)}"
+                ),
                 leave=False,
                 dynamic_ncols=True,
                 mininterval=0.5,
@@ -587,8 +590,8 @@ class PufferCandidateRunner:
         try:
             with tqdm(
                 total=total_steps,
-                desc=f"{dataset.symbol} {PUFFER_AGENT_NAME} f{dataset.fold + 1} s{dataset.seed}",
-                leave=False,
+                desc=f"Train {dataset.symbol} {PUFFER_AGENT_NAME} f{dataset.fold + 1} s{dataset.seed}",
+                leave=True,
                 dynamic_ncols=True,
                 mininterval=0.5,
             ) as progress:
@@ -630,7 +633,7 @@ class PufferCandidateRunner:
                     progress.set_postfix(
                         envs=environment_count,
                         evaluation=f"{evaluation}/{self.evaluations}",
-                        best_ce_alpha=f"{best_score:.4f}",
+                        bestCE=f"{best_score:.4f}",
                         **_gpu_postfix(),
                     )
         finally:

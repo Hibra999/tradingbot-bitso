@@ -51,6 +51,50 @@ class PipelineNotifierTests(unittest.TestCase):
         self.assertEqual(deleted, {10, 11, 20})
         notifier._publish_status.assert_called_once_with((123,))
 
+    def test_status_buttons_route_allowlisted_callbacks(self) -> None:
+        notifier = PipelineNotifier.__new__(PipelineNotifier)
+        notifier._chat_ids = (123,)
+        notifier._state_lock = threading.Lock()
+        notifier._status = "Evaluation"
+        notifier._query_status = "Training 5/10"
+        notifier._started = time.monotonic()
+        notifier._message_ids = {}
+        notifier._sent_message_ids = {}
+        notifier._post = Mock(return_value={"message_id": 12})
+
+        notifier._publish_status((123,))
+        buttons = notifier._post.call_args.kwargs["json"]["reply_markup"]["inline_keyboard"]
+        self.assertEqual(
+            [button["callback_data"] for row in buttons for button in row],
+            ["pipeline:progress", "pipeline:status", "pipeline:help", "pipeline:clear"],
+        )
+        notifier._command_offset = 5
+        notifier._post = Mock(
+            side_effect=[
+                [
+                    {
+                        "update_id": 5,
+                        "callback_query": {
+                            "id": "callback",
+                            "data": "pipeline:progress",
+                            "message": {"message_id": 10, "chat": {"id": 123}},
+                        },
+                    }
+                ],
+                True,
+                {"message_id": 12},
+            ]
+        )
+
+        notifier._poll_commands(timeout=0)
+
+        self.assertEqual(notifier._post.call_count, 3)
+        self.assertEqual(
+            notifier._post.call_args_list[1].kwargs["json"],
+            {"callback_query_id": "callback"},
+        )
+        self.assertIn("Training 5/10", notifier._post.call_args_list[2].kwargs["json"]["text"])
+
     def test_failure_alert_includes_error_without_environment_secret(self) -> None:
         notifier = PipelineNotifier.__new__(PipelineNotifier)
         notifier.stop_updates = Mock()
