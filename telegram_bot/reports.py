@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import html
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,13 @@ from validation import MonteCarloResult, advanced_metrics, drawdowns
 
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt  # noqa: E402
+
+
+_MISSING_ARIAL_MESSAGE = "findfont: Font family 'Arial' not found."
+
+
+def _keep_matplotlib_log(record: logging.LogRecord) -> bool:
+    return not record.getMessage().startswith(_MISSING_ARIAL_MESSAGE)
 
 
 def generate_report(
@@ -321,23 +329,27 @@ def generate_full_report(
         )
     )
     text_path.write_text(text_report + "\n", encoding="utf-8")
-    import quantstats as qs
-
     plt.style.use("default")
     quantstats_values = _quantstats_series(values)
     quantstats_benchmark = (
         _quantstats_series(benchmark_values) if benchmark_values is not None else None
     )
     quantstats_error: str | None = None
+    font_logger = logging.getLogger("matplotlib.font_manager")
+    font_logger.addFilter(_keep_matplotlib_log)
     try:
-        qs.reports.html(
-            quantstats_values,
-            benchmark=quantstats_benchmark,
-            output=str(destination),
-            title=title,
-            periods_per_year=periods,
-            download_filename=destination.name,
-        )
+        with plt.rc_context():
+            import quantstats as qs
+
+            plt.rcParams["font.family"] = "DejaVu Sans"
+            qs.reports.html(
+                quantstats_values,
+                benchmark=quantstats_benchmark,
+                output=str(destination),
+                title=title,
+                periods_per_year=periods,
+                download_filename=destination.name,
+            )
     except np.linalg.LinAlgError:
         quantstats_error = "QuantStats plots unavailable: return covariance is singular."
         plt.close("all")
@@ -348,6 +360,8 @@ def generate_full_report(
             f"<p>{html.escape(quantstats_error)}</p></section></body></html>",
             encoding="utf-8",
         )
+    finally:
+        font_logger.removeFilter(_keep_matplotlib_log)
     encoded = base64.b64encode(graphics.read_bytes()).decode("ascii")
     extra = (
         "<style>.local-report{max-width:960px;margin:36px auto}.local-report table{width:100%;border-collapse:collapse}"

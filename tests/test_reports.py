@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sys
 import tempfile
 import unittest
@@ -10,11 +11,20 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-from telegram_bot.reports import generate_full_report
+from telegram_bot.reports import _keep_matplotlib_log, generate_full_report
 from validation import moving_block_monte_carlo
 
 
 class ReportTests(unittest.TestCase):
+    def test_quantstats_missing_arial_warning_is_filtered(self) -> None:
+        missing_arial = logging.makeLogRecord(
+            {"msg": "findfont: Font family 'Arial' not found."}
+        )
+        other_warning = logging.makeLogRecord({"msg": "different font warning"})
+
+        self.assertFalse(_keep_matplotlib_log(missing_arial))
+        self.assertTrue(_keep_matplotlib_log(other_warning))
+
     def test_singular_quantstats_kde_falls_back_to_local_html(self) -> None:
         index = pd.date_range("2025-01-01", periods=24, freq="h", tz="UTC")
         returns = pd.Series(np.zeros(len(index)), index=index)
