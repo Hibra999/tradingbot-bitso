@@ -25,6 +25,17 @@ The current code derives from the stable base commit:
 
 On top of that base, Telegram, advanced reports, tqdm progress, and CUDA optimizations have already been incorporated. Do not revert these features.
 
+CURRENT MIGRATION OBJECTIVE
+
+- Support histories exceeding 2 million M1 observations without duplicating large per-environment arrays.
+- Replace Stable-Baselines3 and SB3-Contrib with PufferLib 3.0 and one selected recurrent PuffeRL agent. Do not retain parallel RL algorithms after the migration.
+- Identify the agent by name in terminal, Telegram, charts, and reports; do not use `RL` as the strategy label.
+- Do not generate, embed, or send LaTeX `.tex` reports.
+- Send a redacted failure summary to Telegram when the pipeline or reporting fails, without suppressing the original exception.
+- Full validation must retain at least two complete walk-forward folds and adapt the training window to the available development history while preserving the sealed holdout and embargo.
+
+PufferLib 3.0 upstream supports Linux and macOS but rejects native Windows during installation. Do not claim native `python.exe` compatibility or change the user's CUDA/Python/platform target silently. Obtain an explicit platform decision before changing the dependency stack; WSL2/Linux is the supported route if approved.
+
 Before editing:
 1. Inspect the repository and the actual history.
 2. Review all callers of any function you are going to modify.
@@ -162,7 +173,7 @@ The current notifier uses an update thread and the Telegram Bot API via `httpx`.
 
 RTX 5070 OPTIMIZATION
 
-Apply the `optimize-for-gpu` audit to the entire pipeline and all four model paths on every performance change. Prefer an installed, native-Windows-compatible library only when profiling demonstrates lower end-to-end runtime after transfer and compilation overhead.
+Apply the `optimize-for-gpu` audit to the entire pipeline and the selected single model path on every performance change. Prefer an installed, platform-compatible library only when profiling demonstrates lower end-to-end runtime after transfer and compilation overhead.
 
 The priority is reducing actual runtime, not artificially inflating `it/s`.
 
@@ -226,7 +237,7 @@ The pipeline must generate:
 1. Full QuantStats HTML report.
 2. Existing charts.
 3. Readable text tables in terminal and Telegram.
-4. LaTeX tables.
+4. No LaTeX `.tex` artifacts are generated, embedded, or sent to Telegram.
 5. Advanced metrics:
    - Sharpe.
    - Sortino.
