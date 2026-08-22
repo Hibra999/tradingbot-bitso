@@ -61,13 +61,14 @@ class GovernanceTests(unittest.TestCase):
             path.write_text(
                 json.dumps(
                     {
-                        "schema_version": 3,
+                        "schema_version": 4,
                         "profile": "full",
                         "eligible": True,
                         "selected_artifact": artifact,
                         "artifact_paths": [artifact],
                         "eligible_artifacts": [artifact],
                         "artifact_bundle": {
+                            "algorithm": "pufferl",
                             "model_path": artifact,
                             "feature_pipeline_path": str(feature_path),
                             "alpha_pipeline_path": str(alpha_path),

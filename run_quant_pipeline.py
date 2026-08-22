@@ -27,7 +27,7 @@ def main() -> int:
     from config import AppConfig
     from data import load_alpaca_ohlcv, load_binance_context, resample_ohlcv
     from quant import HAR_RV_COLUMNS, add_realized_volatility_features, align_m1_features_to_decisions
-    from rl import CandidateRun, SB3CandidateRunner, TrainingEngine
+    from rl import PUFFER_AGENT_NAME, CandidateRun, PufferCandidateRunner, TrainingEngine
     from telegram_bot import PipelineNotifier
     from telegram_bot.reports import generate_full_report
     from validation import moving_block_monte_carlo
@@ -88,12 +88,13 @@ def main() -> int:
             )
 
     runner = (
-        SB3CandidateRunner(
+        PufferCandidateRunner(
             config.rl.timesteps,
             config.rl.evaluations,
             notifier,
-            config.rl.recurrent_ppo_envs,
-            config.rl.off_policy_envs,
+            config.rl.puffer_envs,
+            config.rl.bptt_horizon,
+            config.rl.minibatch_size,
         )
         if args.profile == "full"
         else SmokeRunner()
@@ -135,19 +136,16 @@ def main() -> int:
                             )
                         )
                     phase_bar.update()
-                    phase_bar.set_postfix_str("training")
-                    notifier.notify_phase("Training", symbol, f"{len(decision):,} H1 bars")
+                    phase_bar.set_postfix_str(f"{PUFFER_AGENT_NAME} training")
+                    notifier.notify_phase(
+                        "Training",
+                        symbol,
+                        f"{PUFFER_AGENT_NAME} | {len(decision):,} H1 bars",
+                    )
                     manifest = TrainingEngine(config, runner=runner, notifier=notifier).run_symbol(symbol, decision, m1)
                     phase_bar.update()
                     reporting = manifest.pop("_reporting")
-                    algorithm = str(reporting["algorithm"])
-                    agent_name = {
-                        "recurrent_ppo": "Recurrent PPO",
-                        "sac": "SAC",
-                        "tqc": "TQC",
-                        "cvar_qrdqn": "CVaR QR-DQN",
-                        "pufferl": "PuffeRL-LSTM",
-                    }.get(algorithm, algorithm.replace("_", " ").title())
+                    agent_name = PUFFER_AGENT_NAME
                     training_returns = reporting["training"]
                     evaluation_returns = reporting["evaluation"]
                     monte_carlo_paths = (

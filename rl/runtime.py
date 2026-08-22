@@ -22,7 +22,7 @@ from quant import (
 )
 
 from .actions import target_exposure_intent
-from .candidates import CVaRQRDQN, RecurrentPolicyRunner
+from .candidates import PUFFER_ALGORITHM, PufferPolicyRunner, load_puffer_policy
 
 
 @dataclass(frozen=True)
@@ -88,34 +88,19 @@ class LivePolicyRuntime:
         self.max_m1_bars = self.required_m1_bars + 60
         self.model = self._load_model(bundle["model_path"])
         self._validate_action_space()
-        self.recurrent = RecurrentPolicyRunner(self.model) if self.algorithm == "recurrent_ppo" else None
         self.history_path = Path(market_data_dir) / f"{self.book}_m1.parquet"
         self.m1 = self._load_history()
 
     def _validate_action_space(self) -> None:
         action_space = self.model.action_space
-        if self.algorithm == "cvar_qrdqn":
-            if int(action_space.n) != 5:
-                raise PermissionError("QR-DQN artifact does not use the target-exposure ladder")
-        elif tuple(action_space.shape) != (1,):
+        if tuple(action_space.shape) != (1,):
             raise PermissionError("continuous-control artifact action space is invalid")
 
     def _load_model(self, path: str):
-        if self.algorithm == "recurrent_ppo":
-            from sb3_contrib import RecurrentPPO
-
-            return RecurrentPPO.load(path, device="auto")
-        if self.algorithm == "sac":
-            from stable_baselines3 import SAC
-
-            return SAC.load(path, device="auto")
-        if self.algorithm == "tqc":
-            from sb3_contrib import TQC
-
-            return TQC.load(path, device="auto")
-        if self.algorithm == "cvar_qrdqn":
-            return CVaRQRDQN.load(path, device="auto")
-        raise ValueError(f"unsupported live algorithm: {self.algorithm}")
+        if self.algorithm != PUFFER_ALGORITHM:
+            raise ValueError(f"unsupported live algorithm: {self.algorithm}")
+        policy = load_puffer_policy(path, len(self.feature_order) + 7)
+        return PufferPolicyRunner(policy)
 
     def _load_history(self) -> pd.DataFrame:
         if not self.history_path.exists():
@@ -150,9 +135,6 @@ class LivePolicyRuntime:
         return decision
 
     def _action_intent(self, action: Any, timestamp: pd.Timestamp) -> TradeIntent:
-        if self.algorithm == "cvar_qrdqn":
-            index = int(np.asarray(action).item())
-            action = np.asarray([index / 4], dtype=np.float32)
         return target_exposure_intent(
             action,
             model_id=self.model_id,
@@ -237,11 +219,7 @@ class LivePolicyRuntime:
         if not 0 <= target_exposure <= 1 or not bool(np.isfinite(state).all()):
             raise RuntimeError("live risk state is outside the approved observation contract")
         observation = np.concatenate((feature_values, state))
-        action = (
-            self.recurrent.predict(observation, deterministic=True)
-            if self.recurrent
-            else self.model.predict(observation, deterministic=True)[0]
-        )
+        action = self.model.predict(observation, deterministic=True)
         return PolicyDecision(
             self._action_intent(action, timestamp),
             Decimal(str(float(current["atr"].iloc[0]))),

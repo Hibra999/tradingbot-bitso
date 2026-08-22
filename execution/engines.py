@@ -275,9 +275,10 @@ class LiveExecutionEngine(BaseExecutionEngine):
             raise RuntimeError("unmanaged existing orders must be reconciled before startup")
         bundle = self.approved_manifest.get("artifact_bundle")
         if (
-            self.approved_manifest.get("schema_version") != 3
+            self.approved_manifest.get("schema_version") != 4
             or not self.approved_manifest.get("selected_artifact")
             or not isinstance(bundle, dict)
+            or bundle.get("algorithm") != "pufferl"
             or bundle.get("action_contract") != "target_exposure_long_cash_v1"
         ):
             raise RuntimeError("approved model manifest schema is invalid")

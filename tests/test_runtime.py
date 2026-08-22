@@ -31,7 +31,7 @@ class _Model:
 
     def predict(self, observation, deterministic=True):
         self.last_observation = observation
-        return np.asarray([0.0], dtype=np.float32), None
+        return np.asarray([0.0], dtype=np.float32)
 
 
 class _Alpha:
@@ -51,9 +51,9 @@ class RuntimeTests(unittest.TestCase):
             "artifact_bundle": {
                 "action_contract": "target_exposure_long_cash_v1",
                 "market_context": "none",
-                "algorithm": "sac",
+                "algorithm": "pufferl",
                 "book": "btc_usd",
-                "model_path": "model.zip",
+                "model_path": "model.pt",
                 "feature_pipeline_path": "features.pkl",
                 "alpha_pipeline_path": "alpha.pkl",
                 "feature_order": ["feature", *ALPHA_FORECAST_COLUMNS],

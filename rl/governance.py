@@ -11,7 +11,7 @@ import pandas as pd
 
 from config import env_flag
 
-_PACKAGES = ("numpy", "pandas", "stable-baselines3", "sb3-contrib", "torch", "gymnasium")
+_PACKAGES = ("numpy", "pandas", "pufferlib", "torch", "gymnasium")
 
 
 def dataframe_hash(frame: pd.DataFrame) -> str:
@@ -59,7 +59,7 @@ def promotion_gate(
     if metrics.get("excess_return_vs_buy_and_hold", float("-inf")) <= 0:
         reasons.append("net return must exceed buy-and-hold on identical timestamps")
     if metrics.get("excess_return_vs_deterministic_alpha", float("-inf")) <= 0:
-        reasons.append("RL must exceed the deterministic alpha policy")
+        reasons.append("PuffeRL-LSTM must exceed the deterministic alpha policy")
     if metrics.get("deterministic_alpha_return", float("-inf")) <= 0:
         reasons.append("deterministic alpha must remain profitable after costs")
     if metrics.get("deterministic_alpha_ci95_low", float("-inf")) <= 0:
@@ -101,7 +101,7 @@ def write_manifest(manifest: dict[str, Any], path: str | Path) -> Path:
 def load_eligible_manifest(path: str | Path) -> dict[str, Any]:
     manifest_path = Path(path).resolve()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != 3 or manifest.get("profile") != "full" or not manifest.get("eligible"):
+    if manifest.get("schema_version") != 4 or manifest.get("profile") != "full" or not manifest.get("eligible"):
         raise PermissionError("manifest schema/profile/gates do not permit live loading")
     selected = manifest.get("selected_artifact")
     declared = set(manifest.get("artifact_paths", []))
@@ -111,6 +111,8 @@ def load_eligible_manifest(path: str | Path) -> dict[str, Any]:
     bundle = manifest.get("artifact_bundle")
     if not isinstance(bundle, dict) or bundle.get("model_path") != selected:
         raise PermissionError("selected artifact must match the complete champion bundle")
+    if bundle.get("algorithm") != "pufferl":
+        raise PermissionError("champion bundle must use PuffeRL-LSTM")
     model_path = Path(selected).resolve()
     feature_path = Path(str(bundle.get("feature_pipeline_path", ""))).resolve()
     alpha_path = Path(str(bundle.get("alpha_pipeline_path", ""))).resolve()

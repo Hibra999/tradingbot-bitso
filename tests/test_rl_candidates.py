@@ -1,39 +1,60 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
+import torch
+from gymnasium import spaces
+from torch import nn
 
-from rl import RecurrentPolicyRunner, lower_tail_scores
+from rl import PufferPolicyRunner, build_puffer_policy
 
 
-class _FakeRecurrentModel:
+class _FakePufferPolicy(nn.Module):
     def __init__(self):
-        self.calls = []
+        super().__init__()
+        self.anchor = nn.Parameter(torch.zeros(1))
+        self.action_space = spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32)
 
-    def predict(self, observation, *, state, episode_start, deterministic):
-        self.calls.append((state, episode_start.copy(), deterministic))
-        return np.array([1]), f"state-{len(self.calls)}"
+    def forward_eval(self, observations, state):
+        previous = state["lstm_h"]
+        mean = torch.full((1, 1), 0.25, device=observations.device)
+        if previous is not None:
+            mean += previous
+        state["lstm_h"] = mean
+        state["lstm_c"] = mean
+        return torch.distributions.Normal(mean, torch.ones_like(mean)), torch.zeros(1, 1)
 
 
 class CandidateTests(unittest.TestCase):
-    def test_cvar_uses_lower_quantiles_instead_of_ordinary_mean(self) -> None:
-        quantiles = np.ones((1, 10, 2))
-        quantiles[0, 0, 0] = 0
-        quantiles[0, 1:, 0] = 100
-        self.assertEqual(int(quantiles.mean(axis=1).argmax(axis=1)[0]), 0)
-        self.assertEqual(int(lower_tail_scores(quantiles, 0.1).argmax(axis=1)[0]), 1)
+    def test_puffer_policy_resets_lstm_state_on_episode_end(self) -> None:
+        observation_space = spaces.Box(-np.inf, np.inf, shape=(3,), dtype=np.float32)
+        environment = SimpleNamespace(
+            single_observation_space=observation_space,
+            observation_space=observation_space,
+            single_action_space=spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
+        )
+        policy = build_puffer_policy(environment, device="cpu")
+        state = {"lstm_h": None, "lstm_c": None, "done": torch.zeros(1, dtype=torch.bool)}
+        policy.forward_eval(torch.ones(1, 3), state)
+        self.assertFalse(
+            bool(torch.allclose(state["lstm_h"], torch.zeros_like(state["lstm_h"])))
+        )
+        state["done"] = torch.ones(1, dtype=torch.bool)
+        policy.forward_eval(torch.zeros(1, 3), state)
+        self.assertTrue(
+            bool(torch.allclose(state["lstm_h"], torch.zeros_like(state["lstm_h"])))
+        )
 
-    def test_recurrent_runner_carries_and_resets_lstm_state(self) -> None:
-        model = _FakeRecurrentModel()
-        runner = RecurrentPolicyRunner(model)
-        runner.predict(np.zeros(3))
-        runner.predict(np.zeros(3))
-        runner.predict(np.zeros(3), episode_start=True)
-        self.assertTrue(model.calls[0][1][0])
-        self.assertEqual(model.calls[1][0], "state-1")
-        self.assertIsNone(model.calls[2][0])
-        self.assertTrue(model.calls[2][1][0])
+    def test_puffer_runner_carries_and_resets_lstm_state(self) -> None:
+        runner = PufferPolicyRunner(_FakePufferPolicy())
+        self.assertAlmostEqual(float(runner.predict(np.zeros(3))[0]), 0.25)
+        self.assertAlmostEqual(float(runner.predict(np.zeros(3))[0]), 0.50)
+        self.assertAlmostEqual(
+            float(runner.predict(np.zeros(3), episode_start=True)[0]),
+            0.25,
+        )
 
 
 if __name__ == "__main__":

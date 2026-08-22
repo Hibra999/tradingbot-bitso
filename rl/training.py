@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import math
+import random
+import signal
 import subprocess
 import time
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -33,8 +37,14 @@ from validation import (
     sharpe_ratio,
 )
 
-from .candidates import RecurrentPolicyRunner, build_cvar_qrdqn, build_recurrent_ppo, build_sac, build_tqc
-from .environment import BracketTradingEnvV2
+from .candidates import (
+    PUFFER_ALGORITHM,
+    PUFFER_AGENT_NAME,
+    PufferPolicyRunner,
+    build_puffer_policy,
+    require_pufferlib,
+)
+from .environment import BracketTradingEnvV2, PufferTradingEnv
 from .governance import dataframe_hash, dependency_versions, file_sha256, promotion_gate, write_manifest
 
 
@@ -296,24 +306,28 @@ def _time_series_momentum(
     return pd.concat(values).sort_index() if values else pd.Series(dtype=float)
 
 
-class SB3CandidateRunner:
+class PufferCandidateRunner:
     """External-machine runner; validation selects a checkpoint, tests only score it."""
 
     def __init__(
         self,
-        timesteps: int | dict[str, int] = 100_000,
+        timesteps: int = 100_000,
         evaluations: int = 5,
         notifier: object | None = None,
         parallel_envs: int = 16,
-        off_policy_envs: int = 8,
+        bptt_horizon: int = 256,
+        minibatch_size: int = 1_024,
     ):
-        if evaluations < 1 or parallel_envs < 1 or off_policy_envs < 1:
-            raise ValueError("evaluations and environment counts must be positive")
+        if min(timesteps, evaluations, parallel_envs, bptt_horizon, minibatch_size) < 1:
+            raise ValueError("PuffeRL training values must be positive")
+        if minibatch_size < bptt_horizon:
+            raise ValueError("PuffeRL minibatches must cover one BPTT sequence")
         self.timesteps = timesteps
         self.evaluations = evaluations
         self.notifier = notifier
         self.parallel_envs = parallel_envs
-        self.off_policy_envs = off_policy_envs
+        self.bptt_horizon = bptt_horizon
+        self.minibatch_size = minibatch_size
 
     @staticmethod
     def _environment(
@@ -328,12 +342,7 @@ class SB3CandidateRunner:
             frame,
             dataset.m1_bars,
             list(dataset.feature_columns),
-            action_mode={
-                "recurrent_ppo": "ppo",
-                "sac": "sac",
-                "tqc": "sac",
-                "cvar_qrdqn": "qrdqn",
-            }[dataset.algorithm],
+            action_mode="ppo",
             randomize=randomize,
             random_seed=random_seed,
             allow_short=False,
@@ -343,6 +352,27 @@ class SB3CandidateRunner:
             base_spread_bps=dataset.base_spread_bps * (
                 dataset.stress_spread_multiplier if stress else 1.0
             ),
+            perturbation_config=PerturbationConfig(
+                slippage_atr_fraction=dataset.stress_slippage_atr_fraction
+            ),
+        )
+
+    def _training_environment(
+        self,
+        dataset: CandidateDataset,
+        segments: tuple[pd.DataFrame, ...],
+        environment_count: int,
+        episode_steps: int,
+    ) -> PufferTradingEnv:
+        return PufferTradingEnv(
+            segments,
+            dataset.m1_bars,
+            list(dataset.feature_columns),
+            num_agents=environment_count,
+            episode_steps=episode_steps,
+            random_seed=dataset.seed,
+            commission_rate=dataset.commission_rate,
+            base_spread_bps=dataset.base_spread_bps,
             perturbation_config=PerturbationConfig(
                 slippage_atr_fraction=dataset.stress_slippage_atr_fraction
             ),
@@ -381,13 +411,13 @@ class SB3CandidateRunner:
                 stress=stress,
             )
             observation, _ = environment.reset(seed=dataset.seed + seed_offset + number)
-            recurrent = RecurrentPolicyRunner(model) if dataset.algorithm == "recurrent_ppo" else None
+            policy = PufferPolicyRunner(model)
             values: list[float] = []
             timestamps: list[pd.Timestamp] = []
             done, previous_equity = False, environment.core.equity
             started, last = time.monotonic(), 0.0
             status = (
-                f"{dataset.symbol} | {dataset.algorithm} | fold {dataset.fold + 1} | "
+                f"{dataset.symbol} | {PUFFER_AGENT_NAME} | fold {dataset.fold + 1} | "
                 f"seed {dataset.seed} | evaluation segment {number}/{len(segments)}"
             )
             with tqdm(
@@ -398,7 +428,7 @@ class SB3CandidateRunner:
                 mininterval=0.5,
             ) as progress:
                 while not done:
-                    action = recurrent.predict(observation) if recurrent else model.predict(observation, deterministic=True)[0]
+                    action = policy.predict(observation)
                     observation, _, terminated, truncated, info = environment.step(action)
                     done = terminated or truncated
                     equity = float(info["equity"])
@@ -449,106 +479,156 @@ class SB3CandidateRunner:
         return pd.concat(returns).sort_index() if returns else pd.Series(dtype=float)
 
     def __call__(self, dataset: CandidateDataset) -> CandidateRun:
-        from stable_baselines3.common.callbacks import BaseCallback
-        from stable_baselines3.common.vec_env import DummyVecEnv
+        require_pufferlib()
+        import torch
 
-        notifier = self.notifier
-
-        class ProgressCallback(BaseCallback):
-            def __init__(self, bar, offset: int, steps: int, label: str, started: float):
-                super().__init__(verbose=0)
-                self.bar, self.offset, self.steps = bar, offset, steps
-                self.label, self.started, self.base, self.last = label, started, 0, 0.0
-
-            def _on_training_start(self) -> None:
-                self.base = self.model.num_timesteps
-
-            def _on_step(self) -> bool:
-                current = self.offset + min(self.steps, max(self.model.num_timesteps - self.base, 0))
-                if self.n_calls % 128 and current < self.offset + self.steps:
-                    return True
-                if current > self.bar.n:
-                    self.bar.update(current - self.bar.n)
-                now = time.monotonic()
-                if now - self.last >= 1.0:
-                    publish = getattr(notifier, "progress", None)
-                    update = getattr(notifier, "update", None)
-                    if publish:
-                        publish(self.label, int(self.bar.n), int(self.bar.total), self.started)
-                    elif update:
-                        update(f"{self.label} | {int(self.bar.n):,}/{int(self.bar.total):,}")
-                    self.last = now
-                return True
+        warning_filters = warnings.filters.copy()
+        sigint_handler = signal.getsignal(signal.SIGINT)
+        try:
+            from pufferlib.pufferl import PuffeRL
+        finally:
+            warnings.filters[:] = warning_filters
+            signal.signal(signal.SIGINT, sigint_handler)
 
         segments = dataset.training_segments
         if not segments:
             raise ValueError("training segments must not be empty")
-        target_envs = self.parallel_envs if dataset.algorithm == "recurrent_ppo" else self.off_policy_envs
-        environment_count = max(len(segments), target_envs)
-        factories = [
-            lambda frame=segments[index % len(segments)], seed=dataset.seed + index: self._environment(
-                dataset, frame, seed
-            )
-            for index in range(environment_count)
-        ]
-        training_env = DummyVecEnv(factories)
-        builder = {
-            "recurrent_ppo": build_recurrent_ppo,
-            "sac": build_sac,
-            "tqc": build_tqc,
-            "cvar_qrdqn": build_cvar_qrdqn,
-        }[dataset.algorithm]
-        model = builder(training_env, seed=dataset.seed)
+        if dataset.algorithm != PUFFER_ALGORITHM:
+            raise ValueError("PufferLib 3.0 is the only supported RL algorithm")
+
+        environment_count = max(len(segments), self.parallel_envs)
+        rollout_size = environment_count * self.bptt_horizon
+        rollout_count = math.ceil(self.timesteps / rollout_size)
+        if rollout_count < self.evaluations:
+            raise ValueError("PuffeRL timesteps must cover at least one rollout per evaluation")
+        chunk, remainder = divmod(rollout_count, self.evaluations)
+        rollouts_by_evaluation = tuple(
+            chunk + (evaluation < remainder) for evaluation in range(self.evaluations)
+        )
+        total_steps = rollout_count * rollout_size
+        minibatch_segments = min(environment_count, self.minibatch_size // self.bptt_horizon)
+        while environment_count % minibatch_segments:
+            minibatch_segments -= 1
+        minibatch_size = minibatch_segments * self.bptt_horizon
+
+        random.seed(dataset.seed)
+        np.random.seed(dataset.seed)
+        torch.manual_seed(dataset.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(dataset.seed)
+
         validation_baseline = self._evaluate_deterministic(dataset, (dataset.validation_segment,))
-        total = self.timesteps.get(dataset.algorithm, 100_000) if isinstance(self.timesteps, dict) else self.timesteps
-        chunk, remainder = divmod(total, self.evaluations)
-        steps_by_evaluation = tuple(max(1, chunk + (evaluation < remainder)) for evaluation in range(self.evaluations))
+        training_env = self._training_environment(
+            dataset,
+            segments,
+            environment_count,
+            rollout_count * self.bptt_horizon,
+        )
+        model = build_puffer_policy(training_env)
+        device = str(next(model.parameters()).device)
+        trainer = PuffeRL(
+            {
+                "env": "tradingbot_bitso",
+                "seed": dataset.seed,
+                "torch_deterministic": True,
+                "device": device,
+                "cpu_offload": False,
+                "optimizer": "adam",
+                "precision": "float32",
+                "total_timesteps": total_steps + rollout_size,
+                "learning_rate": 3e-4,
+                "anneal_lr": False,
+                "gamma": 0.99,
+                "gae_lambda": 0.95,
+                "update_epochs": 10,
+                "clip_coef": 0.2,
+                "vf_coef": 0.5,
+                "vf_clip_coef": 0.2,
+                "max_grad_norm": 0.5,
+                "ent_coef": 0.001,
+                "adam_beta1": 0.9,
+                "adam_beta2": 0.999,
+                "adam_eps": 1e-8,
+                "data_dir": str(dataset.output_dir),
+                "checkpoint_interval": rollout_count + 1,
+                "batch_size": rollout_size,
+                "minibatch_size": minibatch_size,
+                "max_minibatch_size": minibatch_size,
+                "bptt_horizon": self.bptt_horizon,
+                "compile": False,
+                "compile_fullgraph": False,
+                "compile_mode": "default",
+                "use_rnn": True,
+                "vtrace_rho_clip": 1.0,
+                "vtrace_c_clip": 1.0,
+                "prio_alpha": 0.8,
+                "prio_beta0": 0.2,
+            },
+            training_env,
+            model,
+        )
+        trainer.print_dashboard = lambda *args, **kwargs: None  # tqdm owns terminal rendering.
+        if device == "cuda":
+            torch.backends.cudnn.benchmark = False
         best_score = float("-inf")
         validation_scores: list[float] = []
-        artifact = dataset.output_dir / "best_model"
+        artifact = dataset.output_dir / "best_model.pt"
         label = (
-            f"{dataset.symbol} | {dataset.algorithm} | fold {dataset.fold + 1} | "
+            f"{dataset.symbol} | {PUFFER_AGENT_NAME} | fold {dataset.fold + 1} | "
             f"seed {dataset.seed} | {environment_count} envs"
         )
         started = time.monotonic()
-        with tqdm(
-            total=sum(steps_by_evaluation),
-            desc=f"{dataset.symbol} {dataset.algorithm} f{dataset.fold + 1} s{dataset.seed}",
-            leave=False,
-            dynamic_ncols=True,
-            mininterval=0.5,
-        ) as progress:
-            for evaluation, steps in enumerate(steps_by_evaluation, 1):
-                status = f"{label} | evaluation {evaluation}/{self.evaluations}"
-                offset = int(progress.n)
-                model.learn(
-                    steps,
-                    reset_num_timesteps=False,
-                    callback=ProgressCallback(progress, offset, steps, status, started),
-                )
-                target = offset + steps
-                if target > progress.n:
-                    progress.update(target - progress.n)
-                publish = getattr(notifier, "progress", None)
-                if publish:
-                    publish(status, int(progress.n), int(progress.total), started)
-                update = getattr(notifier, "update", None)
-                if update:
-                    update(f"{status} | validation")
-                validation_returns = self._evaluate(model, dataset, (dataset.validation_segment,))
-                score = _certainty_equivalent(validation_returns, validation_baseline)
-                validation_scores.append(sharpe_ratio(validation_returns.dropna().to_numpy()))
-                if evaluation == 1 or np.isfinite(score) and (not np.isfinite(best_score) or score > best_score):
-                    best_score = score
-                    model.save(artifact)
-                progress.set_postfix(
-                    envs=environment_count,
-                    evaluation=f"{evaluation}/{self.evaluations}",
-                    best=f"{best_score:.4f}",
-                    **_gpu_postfix(),
-                )
-        model = model.__class__.load(artifact, env=training_env)
-        update = getattr(notifier, "update", None)
+        try:
+            with tqdm(
+                total=total_steps,
+                desc=f"{dataset.symbol} {PUFFER_AGENT_NAME} f{dataset.fold + 1} s{dataset.seed}",
+                leave=False,
+                dynamic_ncols=True,
+                mininterval=0.5,
+            ) as progress:
+                for evaluation, rollouts in enumerate(rollouts_by_evaluation, 1):
+                    status = f"{label} | evaluation {evaluation}/{self.evaluations}"
+                    for _ in range(rollouts):
+                        before = trainer.global_step
+                        trainer.evaluate()
+                        trainer.train()
+                        progress.update(trainer.global_step - before)
+                        publish = getattr(self.notifier, "progress", None)
+                        if publish:
+                            publish(status, int(progress.n), int(progress.total), started)
+                    update = getattr(self.notifier, "update", None)
+                    if update:
+                        update(f"{status} | validation")
+                    validation_returns = self._evaluate(
+                        model, dataset, (dataset.validation_segment,)
+                    )
+                    score = _certainty_equivalent(validation_returns, validation_baseline)
+                    validation_scores.append(
+                        sharpe_ratio(validation_returns.dropna().to_numpy())
+                    )
+                    if evaluation == 1 or np.isfinite(score) and (
+                        not np.isfinite(best_score) or score > best_score
+                    ):
+                        best_score = score
+                        torch.save(model.state_dict(), artifact)
+                    model.train()
+                    progress.set_postfix(
+                        envs=environment_count,
+                        evaluation=f"{evaluation}/{self.evaluations}",
+                        best=f"{best_score:.4f}",
+                        **_gpu_postfix(),
+                    )
+        finally:
+            trainer.utilization.stop()
+            trainer.utilization.join(timeout=2.0)
+            training_env.close()
+
+        model.load_state_dict(torch.load(artifact, map_location=device, weights_only=True))
+        model.eval()
+        del trainer
+        if device == "cuda":
+            torch.cuda.empty_cache()
+        update = getattr(self.notifier, "update", None)
         if update:
             update(f"{label} | test evaluation")
         training_returns = self._evaluate(model, dataset, dataset.training_segments)
@@ -565,7 +645,7 @@ class SB3CandidateRunner:
         )
         return CandidateRun(
             tuple(test_returns.to_numpy()),
-            str(artifact.with_suffix(".zip")),
+            str(artifact),
             best_score,
             tuple(str(value) for value in test_returns.index),
             tuple(training_returns.to_numpy()),
@@ -598,12 +678,13 @@ class TrainingEngine:
         notifier: object | None = None,
     ):
         self.config = config
-        self.runner = runner or SB3CandidateRunner(
+        self.runner = runner or PufferCandidateRunner(
             config.rl.timesteps,
             config.rl.evaluations,
             notifier,
-            config.rl.recurrent_ppo_envs,
-            config.rl.off_policy_envs,
+            config.rl.puffer_envs,
+            config.rl.bptt_horizon,
+            config.rl.minibatch_size,
         )
         self.notifier = notifier
 
@@ -771,14 +852,14 @@ class TrainingEngine:
         trial_ledger: list[dict[str, object]] = list(alpha_trial_ledger)
         for algorithm in tqdm(
             self.config.rl.algorithms,
-            desc=f"{symbol} algorithms",
+            desc=f"{symbol} {PUFFER_AGENT_NAME}",
             leave=False,
             dynamic_ncols=True,
         ):
             candidates: list[dict[str, object]] = []
             jobs = tqdm(
                 total=len(prepared) * len(seeds),
-                desc=f"{algorithm} fold/seed jobs",
+                desc=f"{PUFFER_AGENT_NAME} fold/seed jobs",
                 leave=False,
                 dynamic_ncols=True,
             )
@@ -890,7 +971,7 @@ class TrainingEngine:
                     update = getattr(self.notifier, "update", None)
                     if update:
                         update(
-                            f"{symbol} | {algorithm} | fold {fold_number + 1}/{len(folds)} | "
+                            f"{symbol} | {PUFFER_AGENT_NAME} | fold {fold_number + 1}/{len(folds)} | "
                             f"seed {seed} complete"
                         )
                     jobs.update()
@@ -1094,7 +1175,7 @@ class TrainingEngine:
             )
             confidence_set = model_confidence_set(
                 {
-                    "RL": evaluation.to_numpy(),
+                    PUFFER_AGENT_NAME: evaluation.to_numpy(),
                     "Alpha": evaluation_deterministic.reindex(evaluation.index).to_numpy(),
                     "Vol B&H": evaluation_volatility_benchmark.reindex(evaluation.index).to_numpy(),
                 },
@@ -1104,7 +1185,7 @@ class TrainingEngine:
             metrics["paired_alpha_ci95_low"] = alpha_test["ci_low"]
             metrics["paired_volatility_bh_ci95_low"] = volatility_test["ci_low"]
             metrics["mcs_90_pass"] = bool(
-                confidence_set["retained"] == ["RL"]
+                confidence_set["retained"] == [PUFFER_AGENT_NAME]
                 and set(confidence_set["eliminated"]) == {"Alpha", "Vol B&H"}
             )
             metrics["model_confidence_set"] = confidence_set
@@ -1135,7 +1216,7 @@ class TrainingEngine:
             notify = getattr(self.notifier, "notify", None)
             if notify:
                 notify(
-                    f"{symbol} | {algorithm} | {'PASS' if algorithm_eligible else 'FAIL'} | "
+                    f"{symbol} | {PUFFER_AGENT_NAME} | {'PASS' if algorithm_eligible else 'FAIL'} | "
                     f"Sharpe {metrics['sharpe']:.4f} | SQN {metrics['sqn']:.4f}"
                 )
             report_candidates.append(
@@ -1458,7 +1539,7 @@ class TrainingEngine:
                 )
                 final_confidence_set = model_confidence_set(
                     {
-                        "RL": holdout_returns.to_numpy(),
+                        PUFFER_AGENT_NAME: holdout_returns.to_numpy(),
                         "Alpha": report_candidate["evaluation_deterministic"].reindex(
                             holdout_returns.index
                         ).to_numpy(),
@@ -1473,7 +1554,7 @@ class TrainingEngine:
                         "paired_alpha_ci95_low": final_alpha_test["ci_low"],
                         "paired_volatility_bh_ci95_low": final_volatility_test["ci_low"],
                         "mcs_90_pass": bool(
-                            final_confidence_set["retained"] == ["RL"]
+                            final_confidence_set["retained"] == [PUFFER_AGENT_NAME]
                             and set(final_confidence_set["eliminated"])
                             == {"Alpha", "Vol B&H"}
                         ),
@@ -1552,6 +1633,7 @@ class TrainingEngine:
             feature_artifact = Path(str(report_candidate["feature_artifact_path"])).resolve()
             alpha_artifact = Path(str(report_candidate["alpha_artifact_path"])).resolve()
             artifact_bundle = {
+                "agent_name": PUFFER_AGENT_NAME,
                 "model_path": str(model_path),
                 "feature_pipeline_path": str(feature_artifact),
                 "alpha_pipeline_path": str(alpha_artifact),
@@ -1580,7 +1662,8 @@ class TrainingEngine:
                 },
             }
         manifest: dict[str, object] = {
-            "schema_version": 3,
+            "schema_version": 4,
+            "agent_name": PUFFER_AGENT_NAME,
             "model_id": f"{symbol.replace('/', '_')}-{self._git_sha()[:12]}",
             "symbol": symbol,
             "profile": self.config.profile,
@@ -1619,6 +1702,7 @@ class TrainingEngine:
             "final_evaluation": final_evaluation,
             "artifact_bundle": artifact_bundle,
             "report_candidate": {
+                "agent_name": PUFFER_AGENT_NAME,
                 "algorithm": report_candidate["algorithm"],
                 "fold": report_candidate["fold"],
                 "seed": report_candidate["seed"],
@@ -1628,6 +1712,7 @@ class TrainingEngine:
         }
         write_manifest(manifest, self.config.outputs_dir / f"{symbol.replace('/', '_')}_manifest.json")
         manifest["_reporting"] = {
+            "agent_name": PUFFER_AGENT_NAME,
             "training": report_candidate["training"],
             "training_benchmark": report_candidate["training_benchmark"],
             "evaluation": report_candidate["evaluation"],

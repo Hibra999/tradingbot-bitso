@@ -6,17 +6,20 @@ The repository is organized by domain. `config/` owns environment-backed setting
 
 ## Build, Test, and Development Commands
 
-Python 3.11 and the fully pinned lock file are required.
+Python 3.11, WSL2/Linux, `g++`, `nvcc`, and the fully pinned lock file are required. Native Windows is unsupported because PufferLib 3.0.0 rejects it. PufferLib must be built with its training extension; `NO_OCEAN=1` skips only unrelated demo environments.
 
 ```bash
-python3.11 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/python -m unittest discover -s tests -v
-.venv/bin/python run_quant_pipeline.py --profile smoke --symbol BTC/USD
-.venv/bin/python run_live_service.py
+conda create --name tradingbot-bitso python=3.11 -y
+conda activate tradingbot-bitso
+python -m pip install numpy==1.26.4 setuptools==84.0.0 torch==2.13.0
+NO_OCEAN=1 python -m pip install --no-build-isolation -r requirements.txt
+python -m pip check
+python -m unittest discover -s tests -v
+python run_quant_pipeline.py --profile smoke --symbol BTC/USD
+python run_live_service.py
 ```
 
-Use the smoke profile for quick, non-promotable research checks. Run `--profile full` only on a CUDA-capable, high-resource machine; it trains all enabled algorithms and performs full validation.
+Use the smoke profile for quick, non-promotable research checks. Run `--profile full` only on a CUDA-capable, high-resource machine; it trains the single recurrent PuffeRL-LSTM agent and performs full validation.
 
 ## Coding Style & Naming Conventions
 

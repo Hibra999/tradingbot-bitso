@@ -34,7 +34,7 @@ CURRENT MIGRATION OBJECTIVE
 - Send a redacted failure summary to Telegram when the pipeline or reporting fails, without suppressing the original exception.
 - Full validation must retain at least two complete walk-forward folds and adapt the training window to the available development history while preserving the sealed holdout and embargo.
 
-PufferLib 3.0 upstream supports Linux and macOS but rejects native Windows during installation. Do not claim native `python.exe` compatibility or change the user's CUDA/Python/platform target silently. Obtain an explicit platform decision before changing the dependency stack; WSL2/Linux is the supported route if approved.
+PufferLib 3.0 upstream supports Linux and macOS but rejects native Windows during installation. The approved target is WSL2/Linux on the user's Windows host, with Conda Python 3.11 and the Linux CUDA toolkit available inside WSL. Do not claim native `python.exe` compatibility.
 
 Before editing:
 1. Inspect the repository and the actual history.
@@ -59,20 +59,14 @@ Required variables and expected defaults:
 
 CACHE_ONLY=true
 BINANCE_CONTEXT_ENABLED=false
-RL_RECURRENT_PPO_ENABLED=true
-RL_RECURRENT_PPO_TIMESTEPS=100000
-RL_RECURRENT_PPO_ENVS=16
-RL_OFF_POLICY_ENVS=8
-RL_SAC_ENABLED=true
-RL_SAC_TIMESTEPS=100000
-RL_TQC_ENABLED=true
-RL_TQC_TIMESTEPS=100000
-RL_CVAR_QRDQN_ENABLED=true
-RL_CVAR_QRDQN_TIMESTEPS=100000
+RL_PUFFER_TIMESTEPS=100000
+RL_PUFFER_ENVS=16
+RL_PUFFER_BPTT_HORIZON=256
+RL_PUFFER_MINIBATCH_SIZE=1024
 RL_EVALUATIONS=5
 VALIDATION_TEMPORAL_GROUPS=3
 VALIDATION_TEST_GROUPS=2
-VALIDATION_FULL_SEEDS=2
+VALIDATION_FULL_SEEDS=5
 VALIDATION_EMBARGO_BARS=200
 VALIDATION_MONTE_CARLO_PATHS=5000
 
@@ -92,9 +86,10 @@ Do NOT execute:
 - Dependency installations.
 
 The user will execute everything on their local machine:
-- Windows.
-- Conda.
-- Python via `python.exe`.
+- Windows host with WSL2/Linux.
+- Conda with Python 3.11 inside WSL.
+- Python via `python` inside WSL.
+- Linux C++ compiler, CUDA toolkit, and `nvcc` visible inside WSL.
 - CUDA 13.3.
 - NVIDIA RTX 5070.
 - High memory capacity and Tensor Cores.
@@ -104,15 +99,15 @@ You may inspect code, diffs, and history. Do not claim that a modification was v
 MAIN USER COMMANDS
 
 Full pipeline:
-`python.exe .\run_quant_pipeline.py --profile full`
+`python run_quant_pipeline.py --profile full`
 
 Smoke pipeline:
-`python.exe .\run_quant_pipeline.py --profile smoke`
+`python run_quant_pipeline.py --profile smoke`
 
 Smoke is an ultra-fast structural verification profile: keep the feature, HMM, alpha, validation, reporting, and candidate interfaces active with minimal non-promotable workloads. Its trading performance is not a research result.
 
 Live/paper service:
-`python.exe .\run_live_service.py`
+`python run_live_service.py`
 
 ARCHITECTURE
 
@@ -120,7 +115,7 @@ ARCHITECTURE
 - `data/`: Alpaca, OHLCV, resampling, and storage.
 - `quant/`: causal features, fracdiff, wavelets, and regimes.
 - `validation/`: CPCV, seeds, metrics, and Monte Carlo.
-- `rl/`: actions, Gym environments, simulated execution, SB3 models, and training.
+- `rl/`: actions, Gym/Puffer environments, simulated execution, PuffeRL models, and training.
 - `execution/`: Bitso REST/WebSocket, risk, journal, and paper/live execution.
 - `telegram_bot/`: Telegram service, notifier, backtests, and reports.
 - `ui/`: FastAPI and dashboard.
@@ -156,14 +151,14 @@ Terminal:
 - Elapsed time.
 - ETA.
 - Speed `it/s`.
-- Phase, algorithm, fold, seed, and evaluation.
+- Phase, PuffeRL-LSTM agent, fold, seed, and evaluation.
 - GPU memory usage when CUDA is available.
 
 Telegram:
 - Must start automatically when running the pipeline if `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_CHAT_IDS` exist.
 - Must send the pipeline start notification.
 - Must periodically edit a single status message.
-- Must show phase, symbol, algorithm, fold, seed, evaluation, progress, `it/s`, ETA, and elapsed time.
+- Must show phase, symbol, PuffeRL-LSTM agent, fold, seed, evaluation, progress, `it/s`, ETA, and elapsed time.
 - Must report completion or failure.
 - Must send final reports, charts, and documents.
 - Must not stop the pipeline if Telegram fails.
@@ -178,15 +173,15 @@ Apply the `optimize-for-gpu` audit to the entire pipeline and the selected singl
 The priority is reducing actual runtime, not artificially inflating `it/s`.
 
 Current situation:
-- Recurrent PPO can use `RL_RECURRENT_PPO_ENVS`, default 16.
-- The current target rollout uses 256 steps per environment.
+- PuffeRL-LSTM is the only training and live-inference agent.
+- Its native Puffer environment uses `RL_PUFFER_ENVS`, default 16, without duplicating the M1 dataframe.
+- Agents receive staggered chronological training windows and never recycle a segment within one candidate run.
+- The recurrent rollout uses `RL_PUFFER_BPTT_HORIZON`, default 256 steps per environment.
 - With 16 environments, it produces 4096 samples.
-- The minibatch can reach 1024.
+- `RL_PUFFER_MINIBATCH_SIZE` defaults to 1024 and is aligned to complete recurrent sequences.
 - PyTorch enables TF32 for matmul and cuDNN.
-- Optimizers use `foreach=True`.
-- SAC and TQC group training with `train_freq=(16, "step")` and 16 gradient steps per environment.
-- CVaR QR-DQN groups training with `train_freq=(32, "step")` and 8 gradient steps per environment.
-- SAC, TQC, and CVaR QR-DQN batch rollout inference across `RL_OFF_POLICY_ENVS`, default 8, and scale gradient steps with the environment count to preserve update density.
+- Rollout buffers and model training stay on CUDA when available; `float32` preserves the CPU fallback.
+- PuffeRL uses ten PPO update epochs, preserving the prior on-policy update density.
 - The training environment avoids creating `Decimal`, `TradeIntent`, and `StepResult` at each timestep by using an internal primitive values route.
 - The public APIs of `TradeIntent` and `StepResult` must be preserved.
 
@@ -214,9 +209,9 @@ Rules:
 - Keep CPU fallback.
 - Leave calibration variables for real differences in CPU, RAM, and GPU.
 
-SAC BUG ALREADY FIXED
+LEGACY SAC ACTION CONTRACT
 
-SAC might return the float32 limit:
+The retained public SAC action helper might receive the float32 limit:
 `0.004999999888...`
 
 This value belongs to the `Box`, even if it is less than the Python literal `0.005`.
@@ -313,8 +308,8 @@ A delivery is considered finished only if:
 2. `--profile full` starts Telegram when variables are available.
 3. Terminal and Telegram show continuous progress.
 4. The progress bar shows real speed.
-5. SAC does not fail on valid float32 limits.
-6. Models use CUDA when available.
+5. The retained SAC action helper does not fail on valid float32 limits.
+6. PuffeRL-LSTM uses CUDA when available.
 7. Optimization does not silently reduce training quality.
 8. Full reports are generated upon completion.
 9. `.env` is not accessed or exposed.

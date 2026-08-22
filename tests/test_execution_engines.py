@@ -170,9 +170,12 @@ class ExecutionEngineTests(unittest.IsolatedAsyncioTestCase):
                 journal,
                 rest,
                 {
-                    "schema_version": 3,
+                    "schema_version": 4,
                     "selected_artifact": "model",
-                    "artifact_bundle": {"action_contract": "target_exposure_long_cash_v1"},
+                    "artifact_bundle": {
+                        "algorithm": "pufferl",
+                        "action_contract": "target_exposure_long_cash_v1",
+                    },
                 },
             )
             engine.enabled = True
@@ -205,9 +208,12 @@ class ExecutionEngineTests(unittest.IsolatedAsyncioTestCase):
                 journal,
                 rest,
                 {
-                    "schema_version": 3,
+                    "schema_version": 4,
                     "selected_artifact": "model",
-                    "artifact_bundle": {"action_contract": "target_exposure_long_cash_v1"},
+                    "artifact_bundle": {
+                        "algorithm": "pufferl",
+                        "action_contract": "target_exposure_long_cash_v1",
+                    },
                 },
             )
             engine.enabled = True
@@ -233,9 +239,12 @@ class ExecutionEngineTests(unittest.IsolatedAsyncioTestCase):
                 journal,
                 _PreflightREST(),
                 {
-                    "schema_version": 3,
+                    "schema_version": 4,
                     "selected_artifact": "model",
-                    "artifact_bundle": {"action_contract": "target_exposure_long_cash_v1"},
+                    "artifact_bundle": {
+                        "algorithm": "pufferl",
+                        "action_contract": "target_exposure_long_cash_v1",
+                    },
                 },
             )
             await engine.preflight(("btc_usd",))

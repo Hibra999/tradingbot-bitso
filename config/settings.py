@@ -74,41 +74,36 @@ class BitsoConfig:
 
 @dataclass(frozen=True)
 class RLConfig:
-    algorithms: tuple[str, ...] = ("recurrent_ppo", "sac", "tqc", "cvar_qrdqn")
+    algorithms: tuple[str, ...] = ("pufferl",)
     risk_fractions: tuple[float, ...] = (0.005, 0.01, 0.02, 0.03)
     sl_atr_multipliers: tuple[float, ...] = (1.0, 1.5, 2.5, 3.5)
     tp_sl_ratios: tuple[float, ...] = (1.0, 1.5, 2.0, 4.0)
     max_holding_bars: int = 24
-    timesteps: dict[str, int] = field(
-        default_factory=lambda: {
-            "recurrent_ppo": 100_000,
-            "sac": 100_000,
-            "tqc": 100_000,
-            "cvar_qrdqn": 100_000,
-        }
-    )
+    timesteps: int = 100_000
     evaluations: int = 5
-    recurrent_ppo_envs: int = 16
-    off_policy_envs: int = 8
+    puffer_envs: int = 16
+    bptt_horizon: int = 256
+    minibatch_size: int = 1_024
+
+    def __post_init__(self) -> None:
+        if self.algorithms != ("pufferl",):
+            raise ValueError("PufferLib 3.0 is the only supported RL algorithm")
+        if min(self.timesteps, self.evaluations, self.puffer_envs, self.bptt_horizon, self.minibatch_size) < 1:
+            raise ValueError("PuffeRL training values must be positive")
+        if self.minibatch_size < self.bptt_horizon:
+            raise ValueError("RL_PUFFER_MINIBATCH_SIZE must cover one BPTT sequence")
+        rollout_size = self.puffer_envs * self.bptt_horizon
+        if self.timesteps < rollout_size * self.evaluations:
+            raise ValueError("RL_PUFFER_TIMESTEPS must cover at least one rollout per evaluation")
 
     @classmethod
     def from_env(cls) -> "RLConfig":
-        names = {
-            "recurrent_ppo": "RL_RECURRENT_PPO",
-            "sac": "RL_SAC",
-            "tqc": "RL_TQC",
-            "cvar_qrdqn": "RL_CVAR_QRDQN",
-        }
         return cls(
-            algorithms=tuple(
-                name
-                for name, prefix in names.items()
-                if env_flag(f"{prefix}_ENABLED", True)
-            ),
-            timesteps={name: env_int(f"{prefix}_TIMESTEPS", 100_000) for name, prefix in names.items()},
+            timesteps=env_int("RL_PUFFER_TIMESTEPS", 100_000),
             evaluations=env_int("RL_EVALUATIONS", 5),
-            recurrent_ppo_envs=env_int("RL_RECURRENT_PPO_ENVS", 16),
-            off_policy_envs=env_int("RL_OFF_POLICY_ENVS", 8),
+            puffer_envs=env_int("RL_PUFFER_ENVS", 16),
+            bptt_horizon=env_int("RL_PUFFER_BPTT_HORIZON", 256),
+            minibatch_size=env_int("RL_PUFFER_MINIBATCH_SIZE", 1_024),
         )
 
 

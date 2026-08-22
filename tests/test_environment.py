@@ -5,7 +5,15 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from rl import BracketExecutionCore, BracketTradingEnvV2, ppo_intent, qrdqn_action_table, sac_intent
+from rl import (
+    BracketExecutionCore,
+    BracketTradingEnvV2,
+    PufferTradingEnv,
+    ppo_intent,
+    qrdqn_action_table,
+    sac_intent,
+)
+from validation import PerturbationConfig
 
 
 class EnvironmentTests(unittest.TestCase):
@@ -93,6 +101,53 @@ class EnvironmentTests(unittest.TestCase):
         self.assertTrue(truncated)
         self.assertEqual(second_info["target_exposure"], 0.0)
         self.assertEqual(environment.core.trades[0]["reason"], "signal")
+
+    def test_native_puffer_environment_batches_and_resets_segments(self) -> None:
+        decisions = pd.DataFrame(
+            {
+                "Open": [100.0] * 5,
+                "High": [100.0] * 5,
+                "Low": [100.0] * 5,
+                "Close": [100.0] * 5,
+                "atr": [1.0] * 5,
+                "feature": [0.0] * 5,
+            },
+            index=pd.date_range("2025-01-01 01:00", periods=5, freq="h", tz="UTC"),
+        )
+        m1 = pd.DataFrame(
+            {"Open": 100.0, "High": 100.0, "Low": 100.0, "Close": 100.0},
+            index=pd.date_range("2025-01-01 01:01", periods=240, freq="min", tz="UTC"),
+        )
+        environment = PufferTradingEnv(
+            (decisions,),
+            m1,
+            ["feature"],
+            num_agents=2,
+            episode_steps=2,
+            random_seed=7,
+            commission_rate=0.0,
+            base_spread_bps=0.0,
+            perturbation_config=PerturbationConfig(),
+        )
+        observations, _ = environment.reset(seed=7)
+        self.assertEqual(observations.shape, (2, 8))
+        self.assertIs(environment.envs[0].m1_bars, m1)
+        self.assertNotEqual(
+            environment.envs[0].decision_bars.index[0],
+            environment.envs[1].decision_bars.index[0],
+        )
+        self.assertTrue(
+            np.shares_memory(
+                environment.envs[0].core._m1_open,
+                environment.envs[1].core._m1_open,
+            )
+        )
+        actions = np.zeros((2, 1), dtype=np.float32)
+        environment.step(actions)
+        _, _, terminals, truncations, infos = environment.step(actions)
+        self.assertTrue(bool(terminals.all()))
+        self.assertFalse(bool(truncations.any()))
+        self.assertEqual(len(infos), 2)
 
 
 if __name__ == "__main__":
