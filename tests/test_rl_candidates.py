@@ -53,16 +53,17 @@ class CandidateTests(unittest.TestCase):
         state = {"lstm_h": None, "lstm_c": None, "done": torch.zeros(1, dtype=torch.bool)}
         logits, _ = policy.forward_eval(torch.ones(1, 3), state)
         self.assertEqual(int(logits.argmax(dim=-1).item()), 5)
-        self.assertGreater(float(torch.softmax(logits, dim=-1)[0, 5]), 0.6)
+        self.assertGreater(float(torch.softmax(logits.detach(), dim=-1)[0, 5]), 0.6)
         self.assertEqual(int(torch.count_nonzero(policy.policy.decoder.weight)), 0)
         self.assertFalse(
             bool(torch.allclose(state["lstm_h"], torch.zeros_like(state["lstm_h"])))
         )
         state["done"] = torch.ones(1, dtype=torch.bool)
         policy.forward_eval(torch.zeros(1, 3), state)
-        self.assertTrue(
-            bool(torch.allclose(state["lstm_h"], torch.zeros_like(state["lstm_h"])))
-        )
+        fresh_state = {"lstm_h": None, "lstm_c": None}
+        policy.forward_eval(torch.zeros(1, 3), fresh_state)
+        self.assertTrue(bool(torch.allclose(state["lstm_h"], fresh_state["lstm_h"])))
+        self.assertTrue(bool(torch.allclose(state["lstm_c"], fresh_state["lstm_c"])))
 
     def test_puffer_runner_carries_and_resets_lstm_state(self) -> None:
         runner = PufferPolicyRunner(_FakePufferPolicy())
