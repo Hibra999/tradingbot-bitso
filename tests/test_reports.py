@@ -62,26 +62,28 @@ class ReportTests(unittest.TestCase):
 
         quantstats = SimpleNamespace(reports=SimpleNamespace(html=quantstats_html))
         with tempfile.TemporaryDirectory() as folder, patch.dict(sys.modules, {"quantstats": quantstats}):
+            destination = Path(folder) / "evaluation.html"
+            destination.with_suffix(".tex").write_text("stale", encoding="utf-8")
             report = generate_full_report(
                 strategy,
                 monte_carlo,
-                Path(folder) / "evaluation.html",
+                destination,
                 title="Evaluation",
                 symbol="BTC/USD",
+                agent_name="PuffeRL-LSTM",
                 benchmark=benchmark,
                 comparators={"Alpha": alpha},
             )
-            self.assertIn("RL model", report["text_report"])
+            self.assertIn("PuffeRL-LSTM", report["text_report"])
+            self.assertNotIn("RL model", report["text_report"])
             self.assertIn("Buy & Hold", report["text_report"])
             self.assertIn("Alpha", report["text_report"])
             self.assertIn("<pre>", report["telegram_report"])
+            self.assertIn("PuffeRL-LSTM", report["telegram_report"])
             self.assertIn("B&amp;H", report["telegram_report"])
             self.assertIn("Buy &amp; Hold", report["html"].read_text(encoding="utf-8"))
-            latex = report["latex"].read_text(encoding="utf-8")
-            self.assertIn(r"\documentclass{article}", latex)
-            self.assertIn(r"\resizebox{\textwidth}{!}", latex)
-            self.assertIn(r"Buy \& Hold", latex)
-            self.assertIn("Alpha", latex)
+            self.assertNotIn("latex", report)
+            self.assertFalse(destination.with_suffix(".tex").exists())
             expected_index = index.tz_convert("UTC").tz_localize(None)
             pd.testing.assert_index_equal(captured["returns"].index, expected_index)
             pd.testing.assert_index_equal(captured["benchmark"].index, expected_index)

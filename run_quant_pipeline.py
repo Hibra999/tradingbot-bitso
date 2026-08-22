@@ -140,6 +140,14 @@ def main() -> int:
                     manifest = TrainingEngine(config, runner=runner, notifier=notifier).run_symbol(symbol, decision, m1)
                     phase_bar.update()
                     reporting = manifest.pop("_reporting")
+                    algorithm = str(reporting["algorithm"])
+                    agent_name = {
+                        "recurrent_ppo": "Recurrent PPO",
+                        "sac": "SAC",
+                        "tqc": "TQC",
+                        "cvar_qrdqn": "CVaR QR-DQN",
+                        "pufferl": "PuffeRL-LSTM",
+                    }.get(algorithm, algorithm.replace("_", " ").title())
                     training_returns = reporting["training"]
                     evaluation_returns = reporting["evaluation"]
                     monte_carlo_paths = (
@@ -173,6 +181,7 @@ def main() -> int:
                         config.outputs_dir / f"{stem}_training_report.html",
                         title=f"{symbol} {args.profile.title()} Training Backtest",
                         symbol=symbol,
+                        agent_name=agent_name,
                         benchmark=reporting["training_benchmark"],
                         comparators={"Alpha": reporting["training_deterministic"]},
                     )
@@ -182,6 +191,7 @@ def main() -> int:
                         config.outputs_dir / f"{stem}_evaluation_report.html",
                         title=f"{symbol} {args.profile.title()} Evaluation Backtest",
                         symbol=symbol,
+                        agent_name=agent_name,
                         benchmark=reporting["evaluation_benchmark"],
                         comparators={
                             "Alpha": reporting["evaluation_deterministic"],
@@ -192,7 +202,8 @@ def main() -> int:
                         notifier.notify_html(report["telegram_report"])
                         notifier.send_photo(report["graphics"], f"{symbol} {split} backtest graphics")
                         notifier.send_document(report["html"], f"{symbol} {split} QuantStats report")
-                        notifier.send_document(report["latex"], f"{symbol} {split} LaTeX tables")
+                        if report["quantstats_error"]:
+                            notifier.notify(f"{symbol} {split} report warning | {report['quantstats_error']}")
                     phase_bar.update()
                 print(
                     json.dumps(
@@ -212,10 +223,10 @@ def main() -> int:
         elapsed = time.monotonic() - started
         tqdm.write(f"Pipeline complete | {elapsed:.1f}s")
         notifier.stop_updates(f"Pipeline complete | {elapsed:.1f}s")
-    except Exception:
+    except Exception as exc:
         elapsed = time.monotonic() - started
         tqdm.write(f"Pipeline failed | {elapsed:.1f}s")
-        notifier.stop_updates(f"Pipeline failed | {elapsed:.1f}s")
+        notifier.notify_failure(exc, elapsed)
         raise
     finally:
         notifier.close()

@@ -20,6 +20,7 @@ def generate_report(
     monte_carlo: MonteCarloResult,
     destination: str | Path,
     *,
+    agent_name: str = "Strategy",
     benchmark: pd.Series | None = None,
     comparators: dict[str, pd.Series] | None = None,
 ) -> Path:
@@ -36,7 +37,7 @@ def generate_report(
 
     plt.style.use("dark_background")
     figure, axes = plt.subplots(2, 2, figsize=(14, 9), constrained_layout=True)
-    axes[0, 0].plot(np.arange(1, len(equity) + 1), equity, color="#38d39f", label="RL model")
+    axes[0, 0].plot(np.arange(1, len(equity) + 1), equity, color="#38d39f", label=agent_name)
     if benchmark is not None:
         benchmark_equity = (1 + benchmark).cumprod()
         axes[0, 0].plot(
@@ -120,35 +121,6 @@ def _telegram_table(
     return f"<b>{html.escape(title)}</b>\n<pre>{html.escape(chr(10).join(lines))}</pre>"
 
 
-def _tex(value: str) -> str:
-    replacements = {
-        "\\": r"\textbackslash{}",
-        "&": r"\&",
-        "%": r"\%",
-        "$": r"\$",
-        "#": r"\#",
-        "_": r"\_",
-        "{": r"\{",
-        "}": r"\}",
-        "~": r"\textasciitilde{}",
-        "^": r"\textasciicircum{}",
-    }
-    return "".join(replacements.get(char, char) for char in value)
-
-
-def _latex_table(title: str, headers: tuple[str, ...], rows: list[tuple[str, ...]]) -> str:
-    header = " & ".join(_tex(value) for value in headers) + r" \\"
-    body = "\n".join(" & ".join(_tex(value) for value in row) + r" \\" for row in rows)
-    return (
-        "\\begin{table}[htbp]\n\\centering\n"
-        f"\\caption{{{_tex(title)}}}\n"
-        "\\resizebox{\\textwidth}{!}{%\n"
-        f"\\begin{{tabular}}{{{'l' + 'r' * (len(headers) - 1)}}}\n\\hline\n"
-        f"{header}\n\\hline\n{body}\n\\hline\n"
-        "\\end{tabular}%\n}\n\\end{table}"
-    )
-
-
 def _html_table(title: str, headers: tuple[str, ...], rows: list[tuple[str, ...]]) -> str:
     head = "".join(f"<th>{html.escape(value)}</th>" for value in headers)
     body = "".join(
@@ -164,6 +136,7 @@ def generate_full_report(
     *,
     title: str = "Backtesting Report",
     symbol: str = "TOTAL",
+    agent_name: str = "Strategy",
     benchmark: pd.Series | None = None,
     comparators: dict[str, pd.Series] | None = None,
 ) -> dict[str, Any]:
@@ -175,10 +148,10 @@ def generate_full_report(
         candidate = benchmark.dropna().astype(float).rename("Buy & Hold")
         if not isinstance(candidate.index, pd.DatetimeIndex):
             raise ValueError("report benchmark requires timestamped observations")
-        aligned = pd.concat((values.rename("RL model"), candidate), axis=1, join="inner").dropna()
+        aligned = pd.concat((values.rename(agent_name), candidate), axis=1, join="inner").dropna()
         if len(aligned) < 2:
             raise ValueError("report strategy and benchmark require at least two aligned observations")
-        values, benchmark_values = aligned["RL model"], aligned["Buy & Hold"]
+        values, benchmark_values = aligned[agent_name], aligned["Buy & Hold"]
     comparator_values: dict[str, pd.Series] = {}
     if comparators:
         candidates = {
@@ -187,25 +160,27 @@ def generate_full_report(
         }
         if any(not isinstance(series.index, pd.DatetimeIndex) for series in candidates.values()):
             raise ValueError("report comparators require timestamped observations")
-        columns = [values.rename("RL model")]
+        columns = [values.rename(agent_name)]
         if benchmark_values is not None:
             columns.append(benchmark_values.rename("Buy & Hold"))
         columns.extend(candidates.values())
         aligned = pd.concat(columns, axis=1, join="inner").dropna()
         if len(aligned) < 2:
             raise ValueError("report strategies require at least two aligned observations")
-        values = aligned["RL model"]
+        values = aligned[agent_name]
         if benchmark_values is not None:
             benchmark_values = aligned["Buy & Hold"]
         comparator_values = {name: aligned[name] for name in candidates}
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     graphics = destination.with_suffix(".png")
-    text_path, latex_path = destination.with_suffix(".txt"), destination.with_suffix(".tex")
+    text_path = destination.with_suffix(".txt")
+    destination.with_suffix(".tex").unlink(missing_ok=True)
     generate_report(
         values,
         monte_carlo,
         graphics,
+        agent_name=agent_name,
         benchmark=benchmark_values,
         comparators=comparator_values,
     )
@@ -233,7 +208,7 @@ def generate_full_report(
             f"{strategy_wins / len(series) * 100:.2f}",
         )
 
-    report_rows = [report_row("RL model", values)]
+    report_rows = [report_row(agent_name, values)]
     benchmark_metrics: dict[str, float] | None = None
     benchmark_total: float | None = None
     if benchmark_values is not None:
@@ -263,7 +238,7 @@ def generate_full_report(
         ("Monte Carlo ruin 20%", _value(monte_carlo.ruin_probability_20, percent=True)),
         ("Monte Carlo ruin 30%", _value(monte_carlo.ruin_probability_30, percent=True)),
     ]
-    metric_headers = ("Metric", "RL model", "Buy & Hold") if benchmark_metrics else ("Metric", "RL model")
+    metric_headers = ("Metric", agent_name, "Buy & Hold") if benchmark_metrics else ("Metric", agent_name)
     comparison_rows = metric_rows
     if benchmark_metrics and benchmark_total is not None and benchmark_values is not None:
         benchmark_display = {
@@ -335,7 +310,7 @@ def generate_full_report(
         if row[0] in compact_labels
     ]
     compact_headers = tuple(
-        "RL" if name == "RL model" else "B&H" if name == "Buy & Hold" else name
+        "B&H" if name == "Buy & Hold" else name
         for name in metric_headers
     )
     telegram_report = _telegram_table(title, compact_headers, compact_rows)
@@ -345,23 +320,7 @@ def generate_full_report(
             _ascii_table("SUMMARY METRICS", metric_headers, comparison_rows),
         )
     )
-    latex_tables = "\n\n".join(
-        (
-            _latex_table("Backtesting Report", report_headers, report_rows),
-            _latex_table("Summary Metrics", metric_headers, comparison_rows),
-        )
-    )
-    latex = (
-        "\\documentclass{article}\n"
-        "\\usepackage[margin=18mm]{geometry}\n"
-        "\\usepackage{graphicx}\n"
-        "\\begin{document}\n"
-        "\\renewcommand{\\arraystretch}{1.15}\n"
-        f"{latex_tables}\n"
-        "\\end{document}"
-    )
     text_path.write_text(text_report + "\n", encoding="utf-8")
-    latex_path.write_text(latex + "\n", encoding="utf-8")
     import quantstats as qs
 
     plt.style.use("default")
@@ -397,7 +356,6 @@ def generate_full_report(
         f"<section class=\"local-report\"><h2>Existing Pipeline Graphics</h2><img class=\"local-graphic\" src=\"data:image/png;base64,{encoded}\" alt=\"Pipeline graphics\"></section>"
         + _html_table("Backtesting Report", report_headers, report_rows)
         + _html_table("Summary Metrics", metric_headers, comparison_rows)
-        + f"<section class=\"local-report\"><h2>LaTeX Tables</h2><pre>{html.escape(latex)}</pre></section>"
     )
     report = destination.read_text(encoding="utf-8")
     report = report.replace("</body>", extra + "</body>") if "</body>" in report else report + extra
@@ -405,7 +363,6 @@ def generate_full_report(
     return {
         "html": destination,
         "graphics": graphics,
-        "latex": latex_path,
         "text": text_path,
         "text_report": text_report,
         "telegram_report": telegram_report,

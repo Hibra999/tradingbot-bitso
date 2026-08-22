@@ -16,6 +16,15 @@ def _parse_chat_ids(value: str) -> tuple[int, ...]:
         return ()
 
 
+def _redacted_error(error: BaseException) -> str:
+    detail = f"{type(error).__name__}: {error}"
+    secret_markers = ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "PRIVATE_KEY")
+    for name, value in os.environ.items():
+        if value and any(marker in name.upper() for marker in secret_markers):
+            detail = detail.replace(value, "[redacted]")
+    return detail[:3000]
+
+
 class PipelineNotifier:
     BASE_URL = "https://api.telegram.org/bot{token}"
 
@@ -140,6 +149,11 @@ class PipelineNotifier:
         self.notify_html(
             f"<b>{html.escape(phase.upper())}</b>\n<code>{html.escape(symbol)}</code>{detail_block}"
         )
+
+    def notify_failure(self, error: BaseException, elapsed: float) -> None:
+        detail = _redacted_error(error)
+        self.stop_updates(f"Pipeline failed | {elapsed:.1f}s | {detail}")
+        self.notify_html(f"<b>PIPELINE ERROR</b>\n<pre>{html.escape(detail)}</pre>")
 
     def _send_file(self, method: str, field: str, path: str | Path, caption: str) -> None:
         source = Path(path)
